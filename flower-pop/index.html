@@ -60,7 +60,7 @@ const FX=24, FY=76;                                        // フィールド左
 const BASEFALL=800, MINFALL=120, SOFT_FALL=34;             // 落下間隔(ms)
 const LOCK_DELAY=450, MAX_RESET=10;                        // 接地猶予
 const DAS=160, ARR=40;                                     // 左右リピート
-const FLASH_MS=260;                                        // 消去フラッシュ
+const FLASH_MS=480;                                        // 消去の演出（v12：ボヨヨンとはずんでから消える）
 const GARBAGE_ENABLED=true, GARBAGE_RATE=0.22;             // お邪魔（石ころ）※0.34→0.22に緩和
 const OJAMA=9;
 const DIRS=[[1,0],[-1,0],[0,1],[0,-1]];
@@ -190,7 +190,7 @@ async function resolve(){
     else { const fc=[...colorSet][0]||1; screenFlash(PAL[fc].m, 0.13, 0.30); }
     if(chain>=5) Audio.chainBurst();                     // 大連鎖の節目に専用ジングル（M3）
     await sleep(FLASH_MS);
-    for(const [r,c] of cells){ burstAt(c,r,PAL[field[r][c]].m); field[r][c]=0; }
+    for(const [r,c] of cells){ softBurstAt(c,r,PAL[field[r][c]]); field[r][c]=0; }
     for(const s of oj){ const [r,c]=s.split(',').map(Number); burstAt(c,r,OJ_COL.l); field[r][c]=0; }
     flash=null; totalCleared+=cleared; updateLevel();
     await sleep(110);
@@ -239,8 +239,25 @@ function burstAt(c,r,col){ const x=FX+c*TS+TS/2, y=FY+(r-HIDDEN)*TS+TS/2;
     parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-2,col,life:0,dur:0.45+Math.random()*0.35,r:2+Math.random()*2.6}); }
   for(let i=0;i<3;i++){ const a=Math.random()*6.28, s=2.5+Math.random()*3;   // 白いきらめき
     parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-2.6,col:'#fff',life:0,dur:0.3+Math.random()*0.22,r:1.1+Math.random()*1.2,spark:true}); } }
+// v12：花が消えるときのやわらかい散り方（ふわっと広がる輪＋ゆっくり舞う花びら）
+function softBurstAt(c,r,P){ const x=FX+c*TS+TS/2, y=FY+(r-HIDDEN)*TS+TS/2;
+  parts.push({x,y,vx:0,vy:0,g:0,col:P.l,life:0,dur:0.42,ring:true});
+  for(let i=0;i<9;i++){ const a=Math.random()*6.28, s=0.8+Math.random()*2.2;
+    parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-1.3,g:0.10,col:i%3?P.m:P.l,life:0,dur:0.6+Math.random()*0.45,r:2.6+Math.random()*2.8}); }
+  for(let i=0;i<3;i++){ const a=Math.random()*6.28, s=1.2+Math.random()*1.8;
+    parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-1.6,g:0.08,col:'#fff',life:0,dur:0.4+Math.random()*0.3,r:1.1+Math.random()*1.2,spark:true}); } }
+// v12：消える花の伸び縮み。t=0〜1 → 横・縦の倍率、濃さ、白い光の強さ
+function boyoyon(t){
+  const hold=0.70;
+  if(t<hold){ const u=t/hold, amp=0.26*Math.exp(-2.2*u), w=Math.sin(u*Math.PI*4), grow=1+0.10*u;   // ぷるん、ぷるんと2回ゆれる
+    return {sx:grow*(1+amp*w), sy:grow*(1-amp*w), a:1, glow:0.30*(1-u)}; }
+  const v=(t-hold)/(1-hold);
+  if(v<0.35){ const s=1.10+0.18*(v/0.35); return {sx:s, sy:s, a:1, glow:0.12+0.25*(v/0.35)}; }     // ふくらむ
+  const k=(v-0.35)/0.65, s=1.28*(1-k*k);                                                              // しゅっとしぼむ
+  return {sx:s, sy:s, a:1-0.5*k, glow:0.37*(1-k)};
+}
 function updateParticles(dt){ const f=dt/16;
-  for(const p of parts){ p.life+=dt/1000; p.x+=p.vx*f; p.y+=p.vy*f; p.vy+=0.5*f; }
+  for(const p of parts){ p.life+=dt/1000; p.x+=p.vx*f; p.y+=p.vy*f; p.vy+=(p.g==null?0.5:p.g)*f; }
   parts=parts.filter(p=>p.life<p.dur);
   if(shakeMag>0){ shakeMag*=Math.pow(0.86,f); if(shakeMag<0.3) shakeMag=0; }   // シェイク減衰
 }
@@ -375,9 +392,15 @@ function render(){
   // 設置済みのはな
   const fset = flash? flash.set : null;
   for(let r=HIDDEN;r<FR;r++)for(let c=0;c<COLS;c++){ const v=field[r][c]; if(v===0) continue;
-    drawCell(r,c,v,1,1);
-    if(fset && fset.has(r+','+c)){ const [x,y]=cellXY(r,c); const a=0.4+0.6*Math.abs(Math.sin(clock()/60));
-      ctx.save(); ctx.globalAlpha=a; ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(x,y,TS*0.46,0,6.2832); ctx.fill(); ctx.restore(); } }
+    if(fset && fset.has(r+','+c)){                         // v12：ボヨヨンとはずんでから消える（となり同士は少しずつずれて動く）
+      const [x,y]=cellXY(r,c); const delay=((r*3+c*5)%4)*22;
+      const t=Math.max(0, Math.min(1, (clock()-flash.born-delay)/(FLASH_MS-66)));
+      const b=boyoyon(t);
+      ctx.save(); ctx.translate(x,y); ctx.scale(b.sx,b.sy); ctx.translate(-x,-y);
+      drawCell(r,c,v,b.a,1);
+      if(b.glow>0.01){ ctx.globalAlpha=b.glow; ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(x,y,TS*0.46,0,6.2832); ctx.fill(); }
+      ctx.restore();
+    } else drawCell(r,c,v,1,1); }
   // ゴースト＆現在ピース
   if(cur && !busy){
     let gy=cur.ay; while(canPlace(cur.ax,gy+1,cur.rot)) gy++;
@@ -390,6 +413,9 @@ function render(){
   }
   // パーティクル
   for(const p of parts){ ctx.save(); ctx.globalAlpha=Math.max(0,1-p.life/p.dur); ctx.fillStyle=p.col;
+    if(p.ring){ const k=Math.min(1,p.life/p.dur), e=1-(1-k)*(1-k);   // v12：ふわっと広がる輪
+      ctx.globalAlpha=0.55*(1-k); ctx.strokeStyle=p.col; ctx.lineWidth=1+3*(1-k);
+      ctx.beginPath(); ctx.arc(p.x,p.y,TS*(0.25+0.6*e),0,6.2832); ctx.stroke(); ctx.restore(); continue; }
     ctx.beginPath(); ctx.arc(p.x,p.y,p.r||3,0,6.2832); ctx.fill();
     if(p.spark){ ctx.fillStyle='#fff'; ctx.fillRect(p.x-0.5,p.y-(p.r||1)*2.2,1,(p.r||1)*4.4); }  // 縦のきらめき光
     ctx.restore(); }
