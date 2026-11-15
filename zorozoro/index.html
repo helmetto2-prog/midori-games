@@ -1,0 +1,1394 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>ゾロゾロ大進軍 v23 〜はじめの一手と、倒れた地の結び版〜</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html,body { touch-action:manipulation; }
+body { background:#0b1020; display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; font-family:'MS Gothic','Courier New',monospace; }
+#wrap { width:800px; max-width:100vw; }
+#status { width:100%; background:linear-gradient(#1b2440,#0d1226); color:#eee; padding:6px 12px; font-size:14px; display:flex; gap:16px; border-bottom:2px solid #2a3a66; }
+canvas { display:block; width:100%; height:auto; box-shadow:0 0 30px rgba(80,120,255,0.25); }
+#log { width:100%; min-height:44px; background:#0a0f1e; color:#9ff; padding:4px 10px; font-size:11px; overflow-y:auto; border-top:1px solid #2a3a66; line-height:1.5; }
+/* ── タッチ操作パネル（スマホ対応。PCでもクリックで操作可） ── */
+#touch { width:100%; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 16px; background:linear-gradient(#0d1226,#1b2440); border-top:2px solid #2a3a66; user-select:none; -webkit-user-select:none; }
+#dpad { display:grid; grid-template-columns:repeat(3,54px); grid-template-rows:repeat(3,54px); gap:6px; }
+#touch button { border:2px solid #3c52a0; background:linear-gradient(#243363,#16224a); color:#dfe8ff; font-size:22px; font-family:inherit; border-radius:10px; cursor:pointer; -webkit-tap-highlight-color:transparent; touch-action:none; }
+#touch button:active { background:linear-gradient(#3a54a8,#243363); border-color:#7ec8e3; }
+#dpad button { width:54px; height:54px; }
+.dp-mid { display:flex; align-items:center; justify-content:center; color:#7d93a6; font-size:11px; }
+#btnSwitch { min-width:96px; height:66px; padding:6px 14px; font-size:15px; line-height:1.3; }
+#btnSwitch b { color:#8dff6b; font-size:16px; }
+@media (max-width:520px){ #dpad { grid-template-columns:repeat(3,48px); grid-template-rows:repeat(3,48px); } #dpad button { width:48px; height:48px; } #status { font-size:12px; gap:10px; } }
+</style>
+</head>
+<body>
+<div id="wrap">
+<div id="status">
+  <span id="st-power">王の戦力: ―</span>
+  <span id="st-allies">兵: 0</span>
+  <span id="st-turn">ターン: 0</span>
+  <span id="st-guard" style="color:#8dff6b">護衛: ―</span>
+  <span id="st-enemies" style="margin-left:auto;color:#f88">敵: ―</span>
+</div>
+<canvas id="c" width="800" height="608"></canvas>
+<div id="log">ログ...</div>
+<div id="touch">
+  <div id="dpad">
+    <div></div><button data-dir="up" aria-label="上">↑</button><div></div>
+    <button data-dir="left" aria-label="左">←</button><div class="dp-mid">移動</div><button data-dir="right" aria-label="右">→</button>
+    <div></div><button data-dir="down" aria-label="下">↓</button><div></div>
+  </div>
+  <button id="btnSwitch">操作切替<br><b id="ctrlName">大将</b></button>
+</div>
+</div>
+<script>
+'use strict';
+const C   = document.getElementById('c');
+const ctx = C.getContext('2d');
+const logEl = document.getElementById('log');
+// ── Constants ────────────────────────────────────────────────────────────────
+const TS = 32, VW = 25, VH = 19, MW = 90, MH = 19;   // マップ幅を 125→90 に短縮（前半の冗長さを解消）
+const SRC_W = 125;                                    // 元の設計幅。下の座標はこの幅で書き、SCXで現幅へ圧縮
+const SCX = x => Math.max(1, Math.min(MW-2, Math.round(x*(MW-1)/(SRC_W-1))));
+const W = VW*TS, H = VH*TS;
+const MAX_TROOPS = 10;
+const PROMOTE_WINS  = 3;
+const NUM_HIDDEN    = 16;
+const STUCK_LIMIT   = 10;
+const FLANK_POW     = 3;                               // 敵を囲む味方1体ごとの攻撃ボーナス（囲み攻撃）
+const RETRY_MAX     = 2;                               // 関所コンティニュー：1周につき使える再挑戦の回数
+const KING_ATK_MS   = 950, ENEMY_ATK_MS = 680, REVEAL_MS = 480;
+const GRASS=0, FOREST=1, WALL=2, ROCK=3, WATER=4;
+const KX0 = 2, KY0 = 9, EKX = MW-3, EKY = 9;
+const CONTROL = [ {key:'king',label:'大将'}, {key:'thin',label:'痩せ'}, {key:'fat',label:'太っちょ'}, {key:'all',label:'全体'} ];
+// 進軍の章立て（S2物語・S5「次の地方が見たい」）：王のx進度で地方が変わり、
+// 初めて境を越えるとチャプターバナー＋一言ロアが出る。敵配置の難度上昇と対応。
+// end = その章で王が討たれたときの結び（S2: 倒れた場所ごとに書き下ろした2行の終幕）。
+const REGIONS = [
+  {x:0,  name:'故郷の草原',   lore:'亡国の民が待つ地。ここから、ただ一人の反攻が始まる。',
+   end:['旗は、故郷の草の上に落ちた。誰も見ていない、静かな最期だった。',
+        '――だが草原の風は、いつまでも大将の名を運びつづけている。']},
+  {x:16, name:'枯れ森の道',   lore:'魔物が巣くう森。光る茂みや岩に、志を同じくする民兵が潜む。',
+   end:['枯れ枝の下に、大将は沈んだ。集めたばかりの民兵が、その名を叫んだ。',
+        '――森を抜けた者だけが、その叫びを次の進軍へ持ち帰った。']},
+  {x:34, name:'獣どもの荒野', lore:'力自慢のオークと俊足の狼が道を塞ぐ。太っちょと痩せの相性で崩せ。',
+   end:['荒野の砂が、倒れた大将を覆っていく。獣どもの遠吠えだけが残った。',
+        '――相性を読み違えた一手。次はきっと、あの牙を裏返せる。']},
+  {x:52, name:'黒騎士の砦跡', lore:'重装の黒騎士と魔導師が守る旧砦。囲んで数の力で圧倒せよ。',
+   end:['砦の石畳に、王冠が転がった。黒騎士は一礼し、静かに剣を収めたという。',
+        '――半分より奥へ来た者は、まだ少ない。ここまで来たことは誇っていい。']},
+  {x:70, name:'古龍の渓谷',   lore:'火を吐く古龍の谷。越えれば地平に、魔王城がそびえて見える。',
+   end:['谷底に炎が満ちた。大将は最後まで、東の空から目を離さなかった。',
+        '――魔王城は、もう見えていた。あと一歩を、次の大将へ託す。']},
+  {x:83, name:'魔王城 門前',  lore:'魔王オゴレス、目前。集めた兵の全てを賭ける祖国解放の最終決戦。',
+   end:['門前で、進軍は途絶えた。魔王オゴレスの哄笑が城壁に反響する。',
+        '――だがこの門を叩いた事実は消えない。次の一撃で、必ず開く。']},
+];
+// S2: 凱旋の結び（勝利エピローグ3行）＋ランク別の最後の一言。
+const WIN_EPILOGUE = [
+  '魔王オゴレスは崩れ落ち、祖国を覆っていた夜が明けた。',
+  '大将は西へ――故郷の草原へと、集めた兵たちを引き連れて帰る。',
+  'ゾロゾロと続く長い列。それは、取り戻された国のかたちそのものだった。',
+];
+const WIN_LAST = { S:'吟遊詩人はこの進軍を「一片の欠けもない凱旋」と歌った。',
+                   A:'民は道の両側に並び、名を呼びつづけた。あと一歩で完璧だった。',
+                   B:'欠けた列に、失われた者の場所が空いている。だが国は救われた。',
+                   C:'傷だらけの列だった。それでも、帰り着いたのだ。' };
+// x は元設計（幅125）の座標。init/buildMap で SCX により現在の幅へ圧縮する。demonking のみ EKX をそのまま使用。
+// 敵キャラ素材ロスター（弱→強）：goblin/skeleton/orc/wolf/bknight/sorcerer/dragon/demonking
+const ENEMY_SPAWNS = [
+  ['goblin',14,7],['goblin',18,11],['skeleton',24,5],       // ★序盤の雑魚（すぐ戦える）
+  ['goblin',30,4],['skeleton',36,13],['goblin',42,7],['skeleton',48,16],
+  ['orc',54,3],['wolf',60,10],['orc',66,6],['wolf',72,14],  // 中級：力押しのオーク／高速の狼
+  ['skeleton',62,9],['goblin',68,2],['orc',78,4],['wolf',84,16],
+  ['bknight',90,8],['sorcerer',96,14],['bknight',102,5],['sorcerer',108,11], // 上級：黒騎士／魔導師
+  ['dragon',112,9],['bknight',114,7],['dragon',118,12],     // 中ボス：古龍
+  ['demonking',EKX,EKY],                                    // 最終ボス：魔王オゴレス（倒すとクリア）
+];
+const WALLS = [
+  [8,3],[8,4],[8,5],[15,12],[15,13],[15,14],[22,6],[22,7],[26,15],[26,16],
+  [33,2],[33,3],[40,9],[40,10],[40,11],[47,5],[47,6],[52,13],[52,14],[58,16],
+  [60,3],[60,4],[66,8],[66,9],[70,12],[70,13],[78,3],[78,4],[82,9],[82,10],[86,14],[86,15],
+  [92,3],[92,4],[98,12],[98,13],[104,6],[104,7],[110,14],[110,15],[116,4],[116,5],
+];
+// ── State ────────────────────────────────────────────────────────────────────
+let map, units, king, camX, turn, gameState, logLines, hiddenAllies, championKey, effects, stuckCount, controlIdx, cine, regionIdx, banner;
+let busy = false, FAST = false;
+// ── S3: 関所コンティニュー（章の入口を丸ごと保存し、王が討たれてもそこから立て直せる）──
+let chapterSave = null, continuesLeft = RETRY_MAX, continuesUsed = 0, deathX = null;
+let shakeAmt = 0, flashAmt = 0, flashCol = '255,255,255', winTime = 0;   // D2演出: 画面シェイク・全画面フラッシュ・勝利の紙吹雪
+const CLASH_MS = 1200, RESULT_MS = 800;   // 戦闘シーン: 押し合い(延長)→勝者・敗者の絵
+function clock(){ return Date.now(); }
+function sleep(ms){ return FAST ? Promise.resolve() : new Promise(r => setTimeout(r, ms)); }
+// ── Map ──────────────────────────────────────────────────────────────────────
+function buildMap() {
+  map = Array.from({length:MH}, (_,y) => Array.from({length:MW}, (_,x) => (y===0||y===MH-1) ? WALL : GRASS));
+  const spawnSet = new Set(ENEMY_SPAWNS.map(([t,x,y]) => (t==='demonking'?x:SCX(x))+','+y));
+  WALLS.forEach(([x,y]) => { const X=SCX(x); if(y>0&&y<MH-1&&X<MW&&map[y][X]===GRASS&&!spawnSet.has(X+','+y)) map[y][X]=WALL; });
+  const blocked = new Set();
+  ENEMY_SPAWNS.forEach(([t,x,y]) => blocked.add((t==='demonking'?x:SCX(x))+','+y));
+  for (let dx=-1; dx<=4; dx++) for (let dy=-1; dy<=1; dy++) blocked.add((KX0+dx)+','+(KY0+dy));
+  for (let dy=-2; dy<=2; dy++){ blocked.add((MW-2)+','+(EKY+dy)); blocked.add((MW-3)+','+(EKY+dy)); }
+  const isFree = (x,y) => x>=1 && x<MW-1 && y>=1 && y<MH-1 && map[y][x]===GRASS && !blocked.has(x+','+y);
+  for (let l=0; l<7; l++) {
+    const lx = 5 + (Math.random()*(MW-14)|0), ly = 2 + (Math.random()*(MH-4)|0);
+    if (!isFree(lx,ly)) continue;
+    const size = 3 + (Math.random()*5|0);
+    const frontier = [[lx,ly]]; let placed = 0;
+    while (frontier.length && placed < size) {
+      const [x,y] = frontier.splice(Math.random()*frontier.length|0, 1)[0];
+      if (!isFree(x,y)) continue;
+      map[y][x] = WATER; placed++; blocked.add(x+','+y);
+      [[1,0],[-1,0],[0,1],[0,-1]].forEach(([dx,dy]) => { if (isFree(x+dx,y+dy)) frontier.push([x+dx,y+dy]); });
+    }
+  }
+  hiddenAllies = new Set();
+  const cover = [];
+  let tries = 0; const SCENERY = 78;
+  while (cover.length < SCENERY && tries < 8000) {
+    tries++;
+    const x = 4 + (Math.random()*(MW-9)|0), y = 1 + (Math.random()*(MH-2)|0);
+    if (!isFree(x,y)) continue;
+    map[y][x] = Math.random()<0.5 ? FOREST : ROCK;
+    cover.push([x,y]); blocked.add(x+','+y);
+  }
+  for (let i=cover.length-1; i>0; i--){ const j=Math.random()*(i+1)|0; const t=cover[i]; cover[i]=cover[j]; cover[j]=t; }
+  const chosen = cover.slice(0, Math.min(NUM_HIDDEN,cover.length));
+  chosen.forEach(c => hiddenAllies.add(c[0]+','+c[1]));
+  // One of the hidden tiles secretly holds the legendary champion — indistinguishable.
+  championKey = chosen.length ? chosen[Math.random()*chosen.length|0].join(',') : null;
+}
+// ── Units ─────────────────────────────────────────────────────────────────────
+const TPL = {
+  king:     {pow:7, color:'#ffd700',label:'王',  isAlly:true,  morale:0, aggro:0},
+  pawnThin: {pow:3, color:'#7ec8e3',label:'痩',  isAlly:true,  morale:1, aggro:0},
+  pawnFat:  {pow:5, color:'#8fd17a',label:'太',  isAlly:true,  morale:2, aggro:0},
+  knight:   {pow:7, color:'#ffe21f',label:'戦',  isAlly:true,  morale:3, aggro:0},
+  champion: {pow:20,color:'#fff2a0',label:'勇',  isAlly:true,  morale:5, aggro:0},
+  goblin:   {pow:3, color:'#6cae3a',label:'ゴ',  isAlly:false, aggro:7},   // 下級：ゴブリン剣士
+  skeleton: {pow:4, color:'#e8e8e0',label:'骨',  isAlly:false, aggro:8},   // 下級：スケルトン兵
+  orc:      {pow:6, color:'#7f9a6a',label:'オ',  isAlly:false, aggro:6},   // 中級：オーク戦士（力押し・遅）
+  wolf:     {pow:5, color:'#3a3a44',label:'狼',  isAlly:false, aggro:12},  // 中級：ダークウルフ（高速）
+  bknight:  {pow:8, color:'#5a4a78',label:'黒',  isAlly:false, aggro:9},   // 上級：黒騎士（重装）
+  sorcerer: {pow:6, color:'#8a3fb0',label:'魔',  isAlly:false, aggro:13},  // 上級：魔導師
+  dragon:   {pow:12,color:'#c0392b',label:'龍',  isAlly:false, aggro:14},  // 中ボス：古龍
+  demonking:{pow:16,color:'#b01050',label:'魔王',isAlly:false, aggro:18},  // 最終ボス：魔王オゴレス
+};
+function cmdGroupOf(type){ return type==='king'?'king':type==='pawnThin'?'thin':type==='pawnFat'?'fat':type==='champion'?'king':'enemy'; }
+function mkUnit(type, x, y) {
+  const t = TPL[type];
+  return {type, x, y, pow:t.pow, color:t.color, label:t.label, isAlly:t.isAlly, aggro:t.aggro, cmd:cmdGroupOf(type), wins:0, alive:true};
+}
+function isPawn(u){ return u.type==='pawnThin' || u.type==='pawnFat'; }
+function unitAt(x, y) { return units.find(u => u.alive && u.x===x && u.y===y); }
+function passable(x,y) { return x>=0&&x<MW&&y>=0&&y<MH && map[y][x]===GRASS; }
+function livingAllies()  { return units.filter(u =>  u.isAlly && u.alive); }
+function livingEnemies() { return units.filter(u => !u.isAlly && u.alive); }
+function troopCount(){ return livingAllies().filter(u => u!==king && u.type!=='champion').length; }
+function hasChampion(){ return units.some(u => u.alive && u.type==='champion'); }
+function moraleBonus() { let m=0; for (const a of livingAllies()) if (a!==king) m += (TPL[a.type].morale||0); return m; }
+function powerOf(u) { return u === king ? u.pow + moraleBonus() : u.pow; }
+function kingPower() { return king.alive ? powerOf(king) : 0; }
+function controlledUnits(){
+  const mode = CONTROL[controlIdx].key;
+  return livingAllies().filter(u => {
+    if (mode==='all')  return true;
+    if (mode==='king') return u.cmd==='king';    // 勇者も cmd='king' なので大将隊として動く
+    return u.cmd===mode;
+  });
+}
+// ── Combat ────────────────────────────────────────────────────────────────────
+// 囲み攻撃：敵(def)に隣接している“攻撃側の味方”1体ごとに攻撃力ボーナス（プレイヤー側のみ）
+function flankBonus(att, def) {
+  if (!att.isAlly) return 0;
+  let n = 0;
+  for (const a of livingAllies()) { if (a===att || a===def) continue;
+    if (Math.abs(a.x-def.x)+Math.abs(a.y-def.y)===1) n++; }
+  return n * FLANK_POW;
+}
+// じゃんけん相性：技(TECH) ＞ 力(POWER) ＞ 速(SPEED) ＞ 技…
+//  太っちょ(力)→敵兵(速)、痩せ(速)→敵騎士(技)、戦士・王・勇者(技)→敵王(力) に強い
+const UCLS = { pawnThin:'SPEED', pawnFat:'POWER', knight:'TECH', king:'TECH', champion:'TECH',
+               goblin:'SPEED', wolf:'SPEED',            // 速：太っちょ(力)が有利
+               skeleton:'TECH', bknight:'TECH', demonking:'TECH', // 技：痩せ(速)が有利
+               orc:'POWER', sorcerer:'POWER', dragon:'POWER' };   // 力：王/戦士/勇者(技)が有利
+const UBEATS = { TECH:'POWER', POWER:'SPEED', SPEED:'TECH' };
+const TYPE_ADV = 1.5;                                  // 相性勝ちの攻撃力倍率
+function typeFactor(att, def){
+  const a=UCLS[att.type], d=UCLS[def.type];
+  if(!a||!d||a===d) return 1;
+  if(UBEATS[a]===d) return TYPE_ADV;                   // 有利（相性勝ち）
+  if(UBEATS[d]===a) return 1/TYPE_ADV;                 // 不利（相性負け）
+  return 1;
+}
+// att が def を攻撃したときの勝率（相性＋囲みボーナス込み）。表示と判定で同じ式を使う
+function atkWinPct(att, def) {
+  const ap = (powerOf(att) + flankBonus(att, def)) * typeFactor(att, def);
+  return Math.max(0.12, Math.min(0.88, ap / (ap + powerOf(def))));
+}
+async function battle(att, def) {
+  const p = atkWinPct(att, def);
+  const aw = Math.random() < p;
+  await battleCine(att, def, aw, def.x, def.y);      // 衝突拡大→勝者/敗者の絵
+  (aw ? def : att).alive = false;
+  (aw ? att : def).wins++;
+  const tf=typeFactor(att,def), rel= tf>1?' 相性○':tf<1?' 相性×':'';
+  addLog(`【戦闘】${att.label}→${def.label}：${(aw?att:def).label}の勝ち！（${att.label}勝率${Math.round(p*100)}%${rel}）`);
+  maybePromote(aw ? att : def);
+  return aw;
+}
+function maybePromote(u) {
+  if (u.isAlly && isPawn(u) && u.wins >= PROMOTE_WINS) {
+    const t = TPL.knight; u.type='knight'; u.pow=t.pow; u.color=t.color; u.label=t.label; u.wins=0; // keep u.cmd (thin/fat) for control
+    addLog('★ 兵士が黄色戦士に昇格した！戦力アップ！');
+    Music.promoteJingle(); flash(0.22,'255,238,120'); shake(4);
+  }
+}
+function purgeDead() { units = units.filter(u => u.alive); }
+// Bodyguard: 王の“隣（斜め含む）にいる兵”だけが身代わりになれる。離れていると王が死ぬ＝隊列が重要
+function adjacentGuard(){
+  let champ=null;
+  for (const u of livingAllies()) { if (u===king) continue;
+    if (Math.max(Math.abs(u.x-king.x), Math.abs(u.y-king.y)) > 1) continue;  // 王に隣接していない兵は守れない
+    if (u.type==='champion'){ champ=champ||u; continue; }                    // 勇者は最後の盾として温存
+    return u;
+  }
+  return champ;
+}
+async function resolveKingCombat(att, def, kingIsAttacker) {
+  const p = atkWinPct(att, def);
+  const aw = Math.random() < p;                       // aw = 攻撃側(att)が勝ち
+  const kingWon = kingIsAttacker ? aw : !aw;
+  const enemy = kingIsAttacker ? def : att;
+  await battleCine(att, def, aw, enemy.x, enemy.y);   // 衝突拡大→勝者/敗者の絵
+  if (kingWon) { enemy.alive=false; king.wins++; addLog(`【戦闘】王 vs ${enemy.label}：王の勝ち！（王勝率${Math.round((kingIsAttacker?p:1-p)*100)}%）`); return 'win'; }
+  const guard = adjacentGuard();
+  if (guard) { guard.alive=false; try{ Music.guardSfx(); }catch(e){} addLog(`【戦闘】王 vs ${enemy.label}：王が敗北…${guard.type==='champion'?'勇者':'護衛'}が身代わりに倒れ王は生存！`); return 'guard'; }
+  king.alive=false; addLog(`【戦闘】王 vs ${enemy.label}：王が討たれた…`); return 'dead';
+}
+// ── Effects ───────────────────────────────────────────────────────────────────
+function addBurst(x,y,dur){ effects.push({x,y,born:clock(),dur}); }
+function clearFx(){ effects = []; }
+// ── D2演出: 画面シェイク／全画面フラッシュ／勝利の紙吹雪 ──────────────────────
+function shake(a){ if(a>shakeAmt) shakeAmt=a; }
+function flash(a,col){ if(a>flashAmt) flashAmt=a; flashCol=col||'255,255,255'; }
+function drawFlash(){
+  if (flashAmt<=0.012){ flashAmt=0; return; }
+  ctx.save(); ctx.globalAlpha=Math.min(0.78,flashAmt); ctx.fillStyle='rgb('+flashCol+')'; ctx.fillRect(0,0,W,H); ctx.restore();
+  flashAmt*=0.82;
+}
+const CONF_COL=['#ffd700','#8dff6b','#7ec8e3','#ff8fce','#fff2a0','#ffa64d'];
+function drawWinConfetti(){
+  const t=(clock()-winTime)/1000; ctx.save();
+  for(let i=0;i<80;i++){
+    const seed=i*137.31, x=(seed*7.13)%W, sway=Math.sin(t*2+seed)*16;
+    const y=(((t*(70+(i%40)*3)) + (seed%H)) % (H+40)) - 20;
+    ctx.save(); ctx.translate(x+sway,y); ctx.rotate(t*4+seed);
+    ctx.globalAlpha=0.9; ctx.fillStyle=CONF_COL[i%CONF_COL.length];
+    ctx.fillRect(-3,-5,6,10);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+async function clashPause(tx,ty,ax,ay,ms){
+  Music.enterBattle();
+  addBurst(tx,ty,ms); addBurst(ax,ay,ms*0.8); render();
+  await sleep(ms);
+  clearFx(); Music.exitBattle();
+}
+// ── 戦闘シーン：衝突箇所を拡大表示し、最後に勝者・敗者の絵を見せてから確定 ──
+async function battleCine(att, def, attackerWon, tx, ty){
+  cine = { att, def, win:attackerWon, x:tx, y:ty, t0:clock(), phase:'clash' };
+  const isBoss = att.type==='demonking' || def.type==='demonking';   // 魔王戦は専用BGMへ
+  Music.enterBattle(isBoss);
+  addBurst(tx, ty, CLASH_MS); shake(3); render();
+  await sleep(CLASH_MS);                 // 押し合い（延長＝約2ビート）
+  cine.phase='result'; cine.t0=clock(); shake(7); flash(0.2,'255,240,180'); render();  // 決着の瞬間にパンチを効かせる
+  // M4: 剣戟＝決着の音、その150ms後に「討ち取った／倒された」が音で分かる
+  try{ Music.clashSfx(); Music.defeatSfx((attackerWon?att:def).isAlly); }catch(e){}
+  try{ Music.enterBattle(isBoss); }catch(e){}
+  await sleep(RESULT_MS);                // 勝者・敗者の絵を一瞬
+  cine=null; clearFx(); Music.exitBattle();
+}
+function drawBig(cx, cy, u, scale, dim){
+  ctx.save();
+  if (dim) ctx.globalAlpha=0.5;
+  ctx.translate(cx-16*scale, cy-16*scale); ctx.scale(scale,scale);
+  if (dim){ ctx.translate(16,30); ctx.rotate(0.4); ctx.translate(-16,-30); }   // 倒れる絵
+  if (u.isAlly) drawHero(0,0,u,0); else drawMonster(0,0,u,0);
+  ctx.restore();
+}
+function drawBattleCine(){
+  if (!cine) return;
+  const c=cine, t=clock()-c.t0;
+  ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(0,0,W,H);
+  const pw=460, ph=300, px=(W-pw)/2, py=(H-ph)/2;
+  const g=ctx.createLinearGradient(0,py,0,py+ph); g.addColorStop(0,'#1a2350'); g.addColorStop(1,'#0b1024');
+  ctx.fillStyle=g; ctx.fillRect(px,py,pw,ph);
+  ctx.strokeStyle='#3c52a0'; ctx.lineWidth=3; ctx.strokeRect(px+1.5,py+1.5,pw-3,ph-3); ctx.lineWidth=1;
+  ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+  ctx.fillStyle='#ffd24d'; ctx.font='bold 22px Courier New'; ctx.fillText('⚔ 戦闘 ⚔', W/2, py+36);
+  const cy=py+172, scale=3.4, lx=px+120, rx=px+pw-120;
+  if (c.phase==='clash'){
+    const sh=Math.sin(t/45)*5;
+    drawBig(lx+sh, cy, c.att, scale, false);
+    drawBig(rx-sh, cy, c.def, scale, false);
+    const pr=(Math.sin(t/70)*0.5+0.5);
+    drawBurst(W/2-16, cy-16, (t%320)/320);
+    ctx.fillStyle='#fff'; ctx.font=`bold ${26+pr*10}px Courier New`; ctx.fillText('VS', W/2, cy+8);
+    ctx.fillStyle='#9bbace'; ctx.font='13px Courier New'; ctx.fillText('（押し合い…）', W/2, py+ph-22);
+  } else {
+    const winner=c.win?c.att:c.def, loser=c.win?c.def:c.att;
+    drawBig(lx, cy, winner, scale*1.08, false);
+    ctx.fillStyle='#ffe21f'; ctx.font='24px serif'; ctx.fillText('★', lx, cy-scale*16-4);
+    drawBig(rx, cy, loser, scale, true);
+    ctx.strokeStyle='#ff5050'; ctx.lineWidth=4;
+    ctx.beginPath(); ctx.moveTo(rx-24,cy-24); ctx.lineTo(rx+24,cy+24); ctx.moveTo(rx+24,cy-24); ctx.lineTo(rx-24,cy+24); ctx.stroke(); ctx.lineWidth=1;
+    ctx.fillStyle='#8dff6b'; ctx.font='bold 20px Courier New'; ctx.fillText(winner.label + ' の勝ち！', W/2, py+ph-22);
+  }
+}
+function freeAdjacent(x,y){
+  for (const [dx,dy] of [[0,1],[1,0],[0,-1],[-1,0],[1,1],[-1,1],[1,-1],[-1,-1]]) {
+    const nx=x+dx, ny=y+dy;
+    if (passable(nx,ny) && !unitAt(nx,ny)) return [nx,ny];
+  }
+  return null;
+}
+function nearestEnemy(u){ let b=null,bd=1e9; for(const e of livingEnemies()){ const d=Math.abs(e.x-u.x)+Math.abs(e.y-u.y); if(d<bd){bd=d;b=e;} } return b; }
+// ── Persistent record (S5: 自己ベスト・通算勝敗をlocalStorageに保存) ──────────
+const REC_KEY = 'zorozoro_record_v1';
+const REC_DEF = {bestTurns:null, wins:0, losses:0, bestRank:null, deepest:0, noCont:false, taught:false};
+function loadRecord(){
+  try{ const r = JSON.parse(localStorage.getItem(REC_KEY)); return Object.assign({}, REC_DEF, r||{}); }
+  catch(e){ return Object.assign({}, REC_DEF); }
+}
+function saveRecord(){ try{ localStorage.setItem(REC_KEY, JSON.stringify(record)); }catch(e){} }
+let record = loadRecord(), newRecord = false;
+// ── 戦績ランク（S5はまり＝「勝つ」だけでなく「速く・兵を多く連れて凱旋する」目標を追加）──
+// 速さ（横断最小は約85ターン）と、生き残った兵力（兵＋勇者）の2軸で評価。両立でSランク。
+const RANK_ORDER = {C:0, B:1, A:2, S:3};
+const RANK_COL   = {S:'#ffd700', A:'#8dff6b', B:'#7ec8e3', C:'#c9b28a'};
+const RANK_MSG   = {
+  S:'完璧な凱旋！速さも兵力も文句なし。',
+  A:'見事な進軍だ。あと一歩でSランク！',
+  B:'祖国は救われた。次はもっと速く、兵を多く。',
+  C:'辛くも勝利。兵を守り、寄り道を減らせば評価は上がる。' };
+let lastRank = null, newBestRank = false;
+function computeRank(){
+  let pts = 0;
+  if      (turn<=115) pts+=3;   // 速攻
+  else if (turn<=145) pts+=2;
+  else if (turn<=185) pts+=1;
+  const army = troopCount() + (hasChampion()?3:0);   // 勇者は+3の価値
+  if      (army>=9) pts+=3;     // 大軍で凱旋
+  else if (army>=6) pts+=2;
+  else if (army>=3) pts+=1;
+  pts -= continuesUsed;         // 関所で立て直した回数だけ評価は下がる＝Sは無傷の制覇の証
+  return pts>=6?'S' : pts>=4?'A' : pts>=2?'B' : 'C';
+}
+let newTitle = false;           // この一戦で称号『不撓の進軍』を初めて得たか
+function recordWin(t){
+  newRecord = (record.bestTurns===null || t<record.bestTurns); if (newRecord) record.bestTurns=t;
+  record.wins++;
+  lastRank = computeRank();
+  newBestRank = (record.bestRank==null || RANK_ORDER[lastRank] > (RANK_ORDER[record.bestRank]??-1));
+  if (newBestRank) record.bestRank = lastRank;
+  // 称号『不撓の進軍』＝一度もコンティニューせずに魔王を討った証（永続）
+  newTitle = (continuesUsed===0 && !record.noCont);
+  if (continuesUsed===0) record.noCont = true;
+  record.deepest = REGIONS.length;
+  saveRecord();
+}
+function recordLose(){ newRecord=false; lastRank=null; newBestRank=false; newTitle=false; record.losses++; saveRecord(); }
+// S5: 到達した最深章を永続記録（負けても残る＝「今度はもっと奥へ」の動機）
+function noteDeepest(){
+  if ((record.deepest||0) < regionIdx+1){
+    record.deepest = regionIdx+1; saveRecord();
+    addLog('🏳 最深到達を更新！ 第'+(regionIdx+1)+'章《'+REGIONS[regionIdx].name+'》へ旗を立てた');
+    // M3: 記録更新だけの専用ジングル。章の角笛(regionJingle)と重ならないよう900ms後ろへずらす
+    if (regionIdx>0) setTimeout(()=>{ try{ Music.deepestJingle(); }catch(e){} }, 900);
+    return true;
+  }
+  return false;
+}
+// ── S1: 「はじめの一手」ガイド（押しつけがましくない4ステップの導入）──────────────
+// タイトルの説明文をぜんぶ読まなくても本編に入れるように、画面の上端に
+// 「いま何をすればいいか」を “1行だけ” 出す。達成したら✔が1.4秒光って次の一手へ進む。
+// 4つ済んだら record.taught を立てて二度と出さない（＝慣れた人の邪魔をしない）。
+const GUIDE = [
+  {t:'→キー／画面下の十字ボタンで東へ進もう（魔王城は遥か東）', ok:()=> king && king.alive && king.x >= KX0+4},
+  {t:'🌲🪨 ほのかに光る木や岩の隣へ行くと、仲間が加わる',       ok:()=> troopCount() >= 3},
+  {t:'⚔ 敵の隣に立つと勝率%が出る。踏み込まず迎え撃つのがコツ',  ok:()=> killedCount() >= 1},
+  {t:'👑 王の隣に必ず兵を。護衛🛡がいないと王は一撃で討たれる',   ok:()=> !!(king && king.alive && adjacentGuard())},
+];
+function killedCount(){ return Math.max(0, ENEMY_SPAWNS.length - livingEnemies().length); }
+let guideIdx = 0, guideOk = 0;                 // guideOk = ✔演出を始めた時刻（0＝演出なし）
+function guideActive(){ return !record.taught && guideIdx < GUIDE.length; }
+function updateGuide(){
+  if (!guideActive() || gameState!=='play' || !king) return;
+  if (guideOk){                                 // ✔を見せている最中
+    if (clock()-guideOk > 1400){
+      guideOk = 0; guideIdx++;
+      if (guideIdx >= GUIDE.length){ record.taught = true; saveRecord();
+        addLog('✔ はじめの一手は身についた。あとは魔王城まで、ゾロゾロと進むだけだ'); }
+    }
+    return;
+  }
+  let done = false; try{ done = !!GUIDE[guideIdx].ok(); }catch(e){ done = false; }
+  if (done){ guideOk = clock(); addLog('✔ '+GUIDE[guideIdx].t); }
+}
+function drawGuide(){
+  if (!guideActive()) return;
+  const done = !!guideOk, g = GUIDE[guideIdx];
+  ctx.save(); ctx.textAlign='left'; ctx.textBaseline='alphabetic'; ctx.font='bold 13px Courier New';
+  const txt = (done?'✔ ':'▶ ') + g.t;
+  const w = Math.min(W-24, ctx.measureText(txt).width + 62), x = (W-w)/2, y = 30;
+  ctx.fillStyle = done ? 'rgba(18,64,28,0.88)' : 'rgba(0,0,0,0.62)';
+  ctx.fillRect(x, y, w, 24);
+  ctx.strokeStyle = done ? '#8dff6b' : 'rgba(126,200,227,0.65)'; ctx.lineWidth = 1;
+  ctx.strokeRect(x+0.5, y+0.5, w-1, 23);
+  ctx.fillStyle = done ? '#8dff6b' : '#cfe6ff';
+  ctx.fillText(txt, x+11, y+17);
+  for (let i=0; i<GUIDE.length; i++){         // 4つのうち今どこか（右端の小さな丸）
+    ctx.fillStyle = i<guideIdx ? '#8dff6b' : i===guideIdx ? '#ffd700' : 'rgba(255,255,255,0.28)';
+    ctx.beginPath(); ctx.arc(x+w-44+i*11, y+12, 3.2, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+// ── S3: 章の入口を丸ごと保存／復元（関所コンティニュー）─────────────────────────
+function snapshotChapter(){
+  chapterSave = {
+    region: regionIdx, turn, controlIdx, champ: championKey,
+    map: map.map(row => row.slice()),
+    units: units.filter(u=>u.alive).map(u => Object.assign({}, u)),
+    hidden: Array.from(hiddenAllies),
+  };
+  chapterSave.kingIdx = units.filter(u=>u.alive).indexOf(king);
+}
+function restoreChapter(){
+  const s = chapterSave; if (!s || s.kingIdx < 0) return false;
+  map = s.map.map(row => row.slice());
+  units = s.units.map(u => Object.assign({}, u));
+  king = units[s.kingIdx];
+  hiddenAllies = new Set(s.hidden); championKey = s.champ;
+  turn = s.turn; regionIdx = s.region; controlIdx = s.controlIdx;
+  effects = []; cine = null; banner = null; stuckCount = 0; busy = false; deathX = null;
+  gameState = 'play';
+  return true;
+}
+function continueChapter(){
+  if (gameState!=='continue' || continuesLeft<=0) return;
+  if (!restoreChapter()) { giveUp(); return; }
+  continuesLeft--; continuesUsed++;
+  perilOn = false;                                  // 関所へ戻る＝危機は一旦リセット
+  const r = REGIONS[regionIdx];
+  { const el=document.getElementById('ctrlName'); if(el) el.textContent=CONTROL[controlIdx].label; }
+  // M3: 敗北のテーマを断ち切って行軍マーチへ戻し、その上に「立ち上がる」ジングルを重ねる
+  try{ Music.setDanger(false); Music.ensure('march'); Music.continueJingle(); }catch(e){}
+  flash(0.28,'140,255,120'); shake(5);
+  showBanner(r.name, '旗は倒れていない。もう一度、ここから。');
+  addLog('⚔ 第'+(regionIdx+1)+'章《'+r.name+'》から再挑戦！（残り'+continuesLeft+'回・評価は1段下がる）');
+  updateHUD();
+}
+function giveUp(){
+  if (gameState!=='continue') return;
+  gameState='lose'; recordLose(); addLog('進軍を打ち切った…王様は倒れたままだ（GAME OVER）');
+}
+// ── Init ──────────────────────────────────────────────────────────────────────
+function init() {
+  buildMap();
+  units = []; logLines = []; turn = 0; camX = 0; busy = false; effects = []; stuckCount = 0; controlIdx = 0; cine = null; regionIdx = 0; banner = null;
+  chapterSave = null; continuesLeft = RETRY_MAX; continuesUsed = 0; deathX = null; newTitle = false;
+  guideIdx = 0; guideOk = 0;                                  // S1: はじめの一手を先頭から（未修了の人だけ表示される）
+  perilOn = false; try{ Music.setDanger(false); }catch(e){}   // M2: 前の一戦の危機を持ち越さない
+  king = mkUnit('king', KX0, KY0);
+  units.push(king);
+  // ── S3: 開幕の従者2名 ──────────────────────────────────────────────────────
+  // 従来は「王ひとりで出発」だったが、この作品の即死条件は“王の隣に兵がいないこと”ひとつ。
+  // 序盤は仲間がまだ0人なので、最初のゴブリン(速)は相性で王(技)に1.5倍＝約4割で王を討てた。
+  // しかも敵はプレイヤーの一歩のあとに動く＝踏み込んだ側が先に殴られる。つまり開幕の数ターンは
+  // 「知っていなければ避けようがない即死」だった。従者2名を最初から隣に置くことで
+  // ①身代わりが必ず1枚ある ②士気+3で王の戦力7→10 ③隊の操作切替を最初の一手から体験できる。
+  ['pawnThin','pawnFat'].forEach(t => { const s = freeAdjacent(king.x, king.y); if (s) units.push(mkUnit(t, s[0], s[1])); });
+  ENEMY_SPAWNS.forEach(([t,x,y]) => { const X = t==='demonking'?x:SCX(x); if(map[y]?.[X]!==WALL) units.push(mkUnit(t,X,y)); });
+  gameState = 'play';
+  snapshotChapter(); noteDeepest();                 // 第1章の関所を記録＋最深到達の初期化
+  try{ Music.ensure('march'); Music.menuSfx(); }catch(e){}   // 進軍開始＝決定音＋タイトル/敗北のテーマから行軍マーチへ
+  { const el=document.getElementById('ctrlName'); if(el) el.textContent=CONTROL[controlIdx].label; }
+  addLog('開始！従者2名が王の隣に付いた（🛡＝身代わり役）。光る木や岩で仲間集め→敵には自分から踏み込まず、隣に来たところを迎え撃つのがコツ。魔王オゴレスを倒せ！');
+  showBanner(REGIONS[0].name, REGIONS[0].lore);   // 第1章《故郷の草原》の幕開け
+}
+function addLog(msg) { logLines.push(msg); if (logLines.length>100) logLines.shift(); logEl.innerHTML = logLines.slice(-3).join('<br>'); }
+function registerBlocked() {
+  // 「詰まっても止めない」：動けなくてもターンは進める。最初に戻したりはしない。
+  stuckCount++;
+  try{ Music.blockSfx(); }catch(e){}   // M4: 押し返される鈍い音で「動けなかった」が手に返る
+  if (stuckCount===1 || stuckCount%6===0) addLog('その方向へは動けない（動ける兵だけ動く）');
+  return false;
+}
+function cycleControl(){ controlIdx = (controlIdx+1) % CONTROL.length; Music.switchSfx(); addLog('操作対象: ' + CONTROL[controlIdx].label); const el=document.getElementById('ctrlName'); if(el) el.textContent=CONTROL[controlIdx].label; }
+// ── Reveal a hidden ally (or the champion) ────────────────────────────────────
+async function revealAt(tx, ty, nearU) {
+  const isChamp = (tx+','+ty)===championKey;
+  hiddenAllies.delete(tx+','+ty);
+  try{ Music.searchSfx(); }catch(e){}   // M4: 茂み/岩をかき分ける音（誰かが潜んでいる気配）
+  addBurst(tx, ty, REVEAL_MS); render();
+  await sleep(REVEAL_MS); clearFx();
+  const where = map[ty][tx]===ROCK ? '岩陰' : '木陰';
+  const spot = freeAdjacent(nearU.x, nearU.y) || freeAdjacent(king.x, king.y);
+  if (isChamp) {
+    if (spot) { units.push(mkUnit('champion', spot[0], spot[1])); addLog(`${where}から⭐伝説の勇者が現れた！大将の隊に加わった（一緒に動かせる）！`); Music.championJingle(); flash(0.42,'255,238,150'); shake(6); }
+    else addLog(`${where}に勇者がいたが、出る場所がなかった…`);
+  } else if (troopCount() < MAX_TROOPS && spot) {
+    const type = Math.random() < 0.5 ? 'pawnThin' : 'pawnFat';
+    units.push(mkUnit(type, spot[0], spot[1]));
+    addLog(`${where}から${type==='pawnFat'?'太っちょ':'痩せ'}の仲間が現れた！（兵${troopCount()}）`);
+    Music.allyJingle(); flash(0.16,'200,255,180');   // M3: 仲間合流の三音（勇者より控えめ）
+  } else if (!spot) addLog(`${where}に仲間がいたが、合流できる場所がなかった…`);
+  else addLog('兵はこれ以上増やせない！（最大' + MAX_TROOPS + '）');
+}
+// 勇者は大将隊（cmd='king'）として commandMove で一緒に動くため、専用の自動突撃は廃止。
+// ── Player command: move the currently-selected group one step ────────────────
+async function commandMove(dx, dy) {
+  if (gameState !== 'play' || busy) return;
+  busy = true;
+  try {
+    const ctrl = controlledUnits();
+    if (ctrl.length === 0) { addLog('その隊には動かせる味方がいない'); return; }
+    ctrl.sort((a,b) => ((b.x-a.x)*dx) + ((b.y-a.y)*dy));   // those ahead in the move dir go first
+    let action = false;
+    for (const u of ctrl) {
+      if (!u.alive) continue;
+      const nx=u.x+dx, ny=u.y+dy;
+      if (nx<0||nx>=MW||ny<0||ny>=MH) continue;
+      const tt = map[ny][nx];
+      if (tt===WALL || tt===WATER) continue;
+      if (tt===FOREST || tt===ROCK) { if (hiddenAllies.has(nx+','+ny)) { await revealAt(nx,ny,u); action=true; } continue; }
+      const occ = unitAt(nx,ny);
+      if (!occ) { u.x=nx; u.y=ny; action=true; continue; }
+      if (occ.isAlly) continue;
+      if (u===king) {
+        const res = await resolveKingCombat(king, occ, true); purgeDead(); render();
+        if (res==='dead') { endCheck(); updateHUD(); return; }
+        if (res==='win') { u.x=nx; u.y=ny; }
+        action=true;
+      } else {
+        const won = await battle(u, occ); if (won) { u.x=nx; u.y=ny; } purgeDead(); render();
+        action=true;
+      }
+    }
+    if (endCheck()) { updateHUD(); return; }
+    if (!action) { if (registerBlocked()) return; } else { stuckCount = 0; Music.stepSfx(); }   // 一歩進むごとの足音
+    checkRegion();                       // 王が新たな地方へ入ったら章バナー（S2/S5）
+    await doEnemyTurn();
+    if (gameState==='play') turn++;
+    endCheck(); updateHUD();
+  } finally { busy = false; }
+}
+// ── Enemy AI (still hunts the king) ───────────────────────────────────────────
+async function doEnemyTurn() {
+  for (const e of livingEnemies()) {
+    if (!e.alive) continue;
+    if ((Math.abs(king.x-e.x)+Math.abs(king.y-e.y)) > e.aggro) continue;
+    const dx = Math.sign(king.x - e.x), dy = Math.sign(king.y - e.y);
+    const dirs = [];
+    if (dx!==0) dirs.push([dx,0]);
+    if (dy!==0) dirs.push([0,dy]);
+    if (dx!==0&&dy!==0) dirs.push([dx,dy]);
+    dirs.push([0,1],[0,-1],[1,0],[-1,0]);
+    for (const [mx,my] of dirs) {
+      const tx=e.x+mx, ty=e.y+my;
+      if (!passable(tx,ty)) continue;
+      const occ = unitAt(tx,ty);
+      if (!occ) { e.x=tx; e.y=ty; break; }
+      if (occ.isAlly) {
+        if (occ === king) {
+          const res = await resolveKingCombat(e, king, false); purgeDead(); render();
+          if (res === 'dead') { endCheck(); return; }   // 敗北 or 関所コンティニューの提示へ
+        } else {
+          const won = await battle(e, occ); if (won) { e.x=tx; e.y=ty; } purgeDead(); render();
+        }
+        break;
+      }
+    }
+  }
+  purgeDead();
+}
+function endCheck() {
+  if (!king.alive) {
+    if (gameState!=='lose' && gameState!=='continue'){
+      if (deathX===null) deathX = king.x;
+      try{ Music.loseJingle(); }catch(e){}
+      flash(0.5,'255,50,50'); shake(11);
+      if (continuesLeft>0 && chapterSave){          // S3: 90マスの進軍が一度の事故で消えないように
+        gameState='continue';
+        addLog('王様が倒れた…だが第'+(chapterSave.region+1)+'章《'+REGIONS[chapterSave.region].name+'》の関所からなら立て直せる（残り'+continuesLeft+'回）');
+      } else {
+        gameState='lose'; recordLose(); addLog('王様が倒された…GAME OVER');
+      }
+    }
+    return true;
+  }
+  if (!units.find(u => u.type==='demonking' && u.alive)) { if(gameState!=='win'){ recordWin(turn); Music.winJingle(lastRank); winTime=clock(); flash(0.6,'255,215,80'); shake(18); } gameState='win'; addLog('魔王オゴレスを倒した！VICTORY!!'); return true; }
+  return false;
+}
+// ── M2: 王の危機の判定（護衛が誰も隣におらず、敵がすぐそこ＝次の一手で討たれ得る）──
+// ヒステリシス: 2マスまで迫ると危機に入り、4マスより離れて初めて行軍マーチへ戻る。
+// 敵が1マス圏を出入りするたびに曲が行き来してうるさくならないための余白。
+let perilOn = false;
+function kingInPeril(){
+  if (gameState!=='play' || !king || !king.alive) return false;
+  if (adjacentGuard()) return false;               // 身代わりが隣にいる＝まだ王は討たれない
+  let d = 1e9;
+  for (const e of livingEnemies()) d = Math.min(d, Math.max(Math.abs(e.x-king.x), Math.abs(e.y-king.y)));
+  return perilOn ? d<=4 : d<=2;
+}
+function syncPeril(){
+  const playing = (gameState==='play');
+  const p = kingInPeril();
+  if (p === perilOn) return;
+  perilOn = p;
+  try{ Music.setDanger(p); }catch(e){}
+  if (!playing) return;                            // 敗北/勝利/関所画面では言葉での実況をしない
+  addLog(p ? '⚠ 王のそばに護衛がいない！敵が迫っている…（兵を王の隣へ）'
+           : '― 護衛が王のもとへ戻った。行軍を続ける');
+}
+function updateHUD() {
+  document.getElementById('st-power').textContent   = `王の戦力: ${kingPower()}（${king.pow}+士気${moraleBonus()}）`;
+  document.getElementById('st-allies').textContent  = `兵: ${troopCount()}${hasChampion()?' +勇者':''}`;
+  document.getElementById('st-turn').textContent    = `ターン: ${turn}`;
+  document.getElementById('st-enemies').textContent = `敵残: ${livingEnemies().length}体`;
+  // S4: 「王の隣に身代わりがいるか」＝このゲーム唯一の即死条件を数字と色で常時表示
+  { const ge = document.getElementById('st-guard'), g = (king && king.alive) ? adjacentGuard() : null;
+    if (ge){ ge.textContent = g ? `護衛: ${g.type==='champion'?'勇者':g.label}` : '護衛: なし';
+             ge.style.color = g ? '#8dff6b' : '#ff6b6b'; } }
+  syncPeril();                                     // 場面の切替はHUD更新と同じ拍で（＝毎ターン必ず通る）
+}
+// ── Render ────────────────────────────────────────────────────────────────────
+function focusX(){ if (cine) return cine.x; if (!king.alive && deathX!==null) return deathX;   // 倒れた場所を映したまま（先頭へ戻らない）
+  const c=controlledUnits(); if (c.length) return c[0].x; return king.alive?king.x:0; }
+function updateCam() { camX = Math.max(0, Math.min(focusX() - Math.floor(VW/2), MW-VW)); }
+// 仲間が隠れている木/岩のヒント（背後の淡い金色グロー＋手前のきらめき）
+function drawHintBack(px, py){
+  const a = 0.13 + 0.10*(Math.sin(clock()/650 + px*0.05)*0.5+0.5);
+  const g = ctx.createRadialGradient(px+16,py+18,2,px+16,py+18,16);
+  g.addColorStop(0,`rgba(255,238,150,${a})`); g.addColorStop(1,'rgba(255,238,150,0)');
+  ctx.fillStyle=g; ctx.fillRect(px-2,py-2,TS+4,TS+4);
+}
+function drawHintFront(px, py){
+  const t=clock()/300; ctx.save();
+  for (let i=0;i<2;i++){ const ang=t+i*Math.PI, sx=px+16+Math.cos(ang)*9, sy=py+12+Math.sin(ang*1.3)*8;
+    const tw=(Math.sin(t*3+i)*0.5+0.5); ctx.globalAlpha=0.3+tw*0.5; ctx.fillStyle='#fffbe0';
+    ctx.fillRect(sx-1,sy-1,2,2); ctx.fillRect(sx,sy-2,1,1); ctx.fillRect(sx-2,sy,1,1); }
+  ctx.restore();
+}
+function drawTree(px, py) {
+  ctx.fillStyle='#5b3a1a'; ctx.fillRect(px+13,py+22,6,9);
+  ctx.fillStyle='#3aa320'; ctx.beginPath(); ctx.arc(px+16,py+13,11,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#2f8a18'; ctx.beginPath(); ctx.arc(px+11,py+16,7,0,Math.PI*2); ctx.arc(px+21,py+16,7,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,0.25)'; ctx.beginPath(); ctx.arc(px+13,py+9,3.5,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='rgba(0,40,0,0.45)'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.arc(px+16,py+13,11,0,Math.PI*2); ctx.stroke(); ctx.lineWidth=1;
+}
+function drawRock(px, py) {
+  ctx.fillStyle='#9a948a'; ctx.beginPath(); ctx.moveTo(px+5,py+27); ctx.lineTo(px+8,py+15); ctx.lineTo(px+16,py+9); ctx.lineTo(px+25,py+15); ctx.lineTo(px+27,py+27); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#6d675c'; ctx.beginPath(); ctx.moveTo(px+16,py+9); ctx.lineTo(px+25,py+15); ctx.lineTo(px+27,py+27); ctx.lineTo(px+16,py+27); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,0.28)'; ctx.beginPath(); ctx.moveTo(px+8,py+15); ctx.lineTo(px+16,py+9); ctx.lineTo(px+16,py+19); ctx.lineTo(px+10,py+21); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle='rgba(0,0,0,0.4)'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(px+5,py+27); ctx.lineTo(px+8,py+15); ctx.lineTo(px+16,py+9); ctx.lineTo(px+25,py+15); ctx.lineTo(px+27,py+27); ctx.stroke(); ctx.lineWidth=1;
+}
+function drawWater(px, py) {
+  const g = ctx.createLinearGradient(px,py,px,py+TS); g.addColorStop(0,'#3aa6e6'); g.addColorStop(1,'#1d6cb0');
+  ctx.fillStyle=g; ctx.fillRect(px,py,TS,TS);
+  ctx.strokeStyle='rgba(255,255,255,0.4)'; ctx.lineWidth=1.5;
+  const t=clock()/420;
+  for (let i=0;i<3;i++){ const yy=py+8+i*8+Math.sin(t+i+px*0.12)*1.6; ctx.beginPath(); ctx.moveTo(px+4,yy); ctx.quadraticCurveTo(px+16,yy+3,px+28,yy); ctx.stroke(); }
+  ctx.lineWidth=1; ctx.strokeStyle='rgba(0,0,0,0.22)'; ctx.strokeRect(px+0.5,py+0.5,TS-1,TS-1);
+}
+function drawTile(vx, vy, mx, my) {
+  const t = map[my][mx], px = vx*TS, py = vy*TS;
+  const g = ctx.createLinearGradient(px,py,px,py+TS); g.addColorStop(0,'#3a7a26'); g.addColorStop(1,'#2c5e1a');
+  ctx.fillStyle=g; ctx.fillRect(px,py,TS,TS);
+  if ((mx+my)%2===0){ ctx.fillStyle='rgba(255,255,255,0.04)'; ctx.fillRect(px,py,TS,TS); }
+  if (t===WALL) {
+    ctx.fillStyle='#5a6070'; ctx.fillRect(px+1,py+1,TS-2,TS-2);
+    ctx.fillStyle='rgba(255,255,255,0.12)'; ctx.fillRect(px+2,py+2,TS-4,4);
+    ctx.fillStyle='rgba(0,0,0,0.3)'; ctx.fillRect(px+2,py+TS-6,TS-4,4);
+    ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.strokeRect(px+1,py+1,TS-2,TS-2);
+  } else if (t===FOREST || t===ROCK) {
+    const hidden = hiddenAllies && hiddenAllies.has(mx+','+my);
+    if (hidden) drawHintBack(px, py);
+    if (t===FOREST) drawTree(px, py); else drawRock(px, py);
+    if (hidden) drawHintFront(px, py);
+  }
+  else if (t===WATER)  drawWater(px, py);
+}
+function outline(){ ctx.strokeStyle='rgba(20,20,30,0.85)'; ctx.lineWidth=1.5; ctx.stroke(); ctx.lineWidth=1; }
+function drawChampion(px, py, bob) {
+  const cx = px+16, y = py+bob, pulse=(Math.sin(clock()/180)*0.5+0.5);
+  for (let i=0;i<3;i++){ ctx.globalAlpha = Math.max(0,0.28-i*0.07+pulse*0.15); ctx.fillStyle = i%2?'#fff7c0':'#ffd24d'; ctx.beginPath(); ctx.arc(cx,y+15,12+i*4+pulse*3,0,Math.PI*2); ctx.fill(); }
+  ctx.globalAlpha=1;
+  ctx.fillStyle='#c0392b'; ctx.beginPath(); ctx.moveTo(cx-6,y+13); ctx.lineTo(cx+6,y+13); ctx.lineTo(cx+9,y+27); ctx.lineTo(cx-9,y+27); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#3a4668'; ctx.fillRect(cx-4,y+22,3,6); ctx.fillRect(cx+1,y+22,3,6);
+  ctx.fillStyle='#ffe680'; ctx.beginPath(); ctx.moveTo(cx-6.5,y+23); ctx.lineTo(cx-5,y+12); ctx.lineTo(cx+5,y+12); ctx.lineTo(cx+6.5,y+23); ctx.closePath(); ctx.fill(); outline();
+  ctx.fillStyle='#caa11a'; ctx.fillRect(cx-6.5,y+19,13,2);
+  ctx.fillStyle='#f7d3ab'; ctx.beginPath(); ctx.arc(cx,y+8,4.6,0,Math.PI*2); ctx.fill(); outline();
+  ctx.fillStyle='#222'; ctx.beginPath(); ctx.arc(cx-2,y+8,1,0,Math.PI*2); ctx.arc(cx+2,y+8,1,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle='#fff7c0'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(cx,y+3,4,Math.PI*1.05,Math.PI*1.95); ctx.stroke(); ctx.lineWidth=1;
+  ctx.save(); ctx.shadowColor='#ffffff'; ctx.shadowBlur=8;
+  ctx.strokeStyle='#eaf6ff'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(cx+7,y+24); ctx.lineTo(cx+13,y+1); ctx.stroke();
+  ctx.restore(); ctx.lineWidth=1;
+  ctx.strokeStyle='#caa11a'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(cx+4,y+18); ctx.lineTo(cx+10,y+18); ctx.stroke(); ctx.lineWidth=1;
+  ctx.fillStyle='#fff'; for (let i=0;i<3;i++){ const a=clock()/300+i*2.1; ctx.fillRect(cx+Math.cos(a)*14-1, y+15+Math.sin(a)*12-1, 2,2); }
+  ctx.fillStyle='#ffe21f'; ctx.font='10px sans-serif'; ctx.textAlign='center'; ctx.fillText('★', cx, y-2);
+}
+function drawHero(px, py, u, bob) {
+  const cx = px+16, t=u.type;
+  if (t==='champion') { drawChampion(px,py,bob); return; }
+  const isKing=t==='king', isKnight=t==='knight', isThin=t==='pawnThin', isFat=t==='pawnFat';
+  const y = py + bob;
+  if (isKnight) { ctx.fillStyle='rgba(255,230,30,0.4)'; ctx.beginPath(); ctx.arc(cx,y+16,14,0,Math.PI*2); ctx.fill(); }
+  const robe     = isKing?'#f2c230':isKnight?'#ffe21f':isFat?'#8fd17a':'#7ec8e3';
+  const robeDark = isKing?'#b3891a':isKnight?'#c9a610':isFat?'#5fa85a':'#4f9ab8';
+  const halfW = isFat?8 : isThin?3.6 : 5.2;
+  ctx.fillStyle='#3a4668'; ctx.fillRect(cx-halfW*0.6,y+22,3,6); ctx.fillRect(cx+halfW*0.6-3,y+22,3,6);
+  ctx.fillStyle=robeDark; ctx.fillRect(cx-halfW-2,y+14,3,8); ctx.fillRect(cx+halfW-1,y+14,3,8);
+  ctx.fillStyle=robe;
+  if (isFat) { ctx.beginPath(); ctx.ellipse(cx,y+18,halfW,7.5,0,0,Math.PI*2); ctx.fill(); outline(); }
+  else { ctx.beginPath(); ctx.moveTo(cx-halfW,y+23); ctx.lineTo(cx-halfW*0.7,y+13); ctx.lineTo(cx+halfW*0.7,y+13); ctx.lineTo(cx+halfW,y+23); ctx.closePath(); ctx.fill(); outline(); }
+  ctx.fillStyle=robeDark; ctx.fillRect(cx-halfW,y+20,halfW*2,2);
+  ctx.fillStyle='#f7d3ab'; ctx.beginPath(); ctx.arc(cx,y+9,isFat?4.8:4.3,0,Math.PI*2); ctx.fill(); outline();
+  ctx.fillStyle='#222'; ctx.beginPath(); ctx.arc(cx-2,y+9,1,0,Math.PI*2); ctx.arc(cx+2,y+9,1,0,Math.PI*2); ctx.fill();
+  if (!isKing) { ctx.fillStyle = isKnight?'#8a6a14':'#3a2a18'; ctx.beginPath(); ctx.arc(cx,y+7,4.5,Math.PI,0); ctx.fill(); }
+  if (isKing) {
+    ctx.fillStyle='#ffd700'; ctx.beginPath();
+    ctx.moveTo(cx-5,y+6); ctx.lineTo(cx-5,y+1); ctx.lineTo(cx-2.5,y+3.5); ctx.lineTo(cx,y+0);
+    ctx.lineTo(cx+2.5,y+3.5); ctx.lineTo(cx+5,y+1); ctx.lineTo(cx+5,y+6); ctx.closePath(); ctx.fill(); outline();
+    ctx.fillStyle='#ff4d4d'; ctx.fillRect(cx-1,y+3,2,2);
+  }
+  if (isKnight) {
+    ctx.strokeStyle='#eef'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(cx+7,y+22); ctx.lineTo(cx+11,y+6); ctx.stroke();
+    ctx.strokeStyle='#caa11a'; ctx.beginPath(); ctx.moveTo(cx+5,y+18); ctx.lineTo(cx+9,y+18); ctx.stroke(); ctx.lineWidth=1;
+  } else if (isThin || isFat) {
+    ctx.strokeStyle='#8B5A2B'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(cx+halfW+1,y+25); ctx.lineTo(cx+halfW+2,y+4); ctx.stroke(); ctx.lineWidth=1;
+    ctx.fillStyle='#dfe2e6'; ctx.beginPath(); ctx.moveTo(cx+halfW+2,y+2); ctx.lineTo(cx+halfW-1,y+7); ctx.lineTo(cx+halfW+5,y+7); ctx.closePath(); ctx.fill();
+  } else if (isKing) {
+    ctx.strokeStyle='#caa11a'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(cx+7,y+24); ctx.lineTo(cx+8,y+7); ctx.stroke(); ctx.lineWidth=1;
+    ctx.fillStyle='#ff4d4d'; ctx.beginPath(); ctx.arc(cx+8,y+6,2.3,0,Math.PI*2); ctx.fill();
+  }
+}
+// ── 敵キャラ素材ロスター（Canvasドット絵風）。各 fn は中心(cx,cy)に描く ──
+function drawGoblin(cx,cy){ const g='#6cae3a',d='#3f7a1e';
+  ctx.fillStyle=g; ctx.beginPath(); ctx.moveTo(cx-6,cy-3); ctx.lineTo(cx-13,cy-7); ctx.lineTo(cx-5,cy+1); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx+6,cy-3); ctx.lineTo(cx+13,cy-7); ctx.lineTo(cx+5,cy+1); ctx.fill();
+  ctx.fillStyle='#6b5030'; ctx.fillRect(cx-5,cy+3,10,8);
+  ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy-2,7,0,6.2832); ctx.fill(); ctx.strokeStyle=d; ctx.lineWidth=1.5; ctx.stroke(); ctx.lineWidth=1;
+  ctx.fillStyle='#ffd23a'; ctx.beginPath(); ctx.arc(cx-3,cy-2,1.7,0,6.2832); ctx.arc(cx+3,cy-2,1.7,0,6.2832); ctx.fill();
+  ctx.fillStyle='#000'; ctx.beginPath(); ctx.arc(cx-3,cy-2,0.8,0,6.2832); ctx.arc(cx+3,cy-2,0.8,0,6.2832); ctx.fill();
+  ctx.strokeStyle='#1a3a0a'; ctx.beginPath(); ctx.moveTo(cx-3,cy+2); ctx.lineTo(cx+3,cy+2); ctx.stroke();
+  ctx.strokeStyle='#cfcfcf'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(cx+6,cy+9); ctx.lineTo(cx+11,cy+1); ctx.stroke(); ctx.lineWidth=1; }
+function drawSkeleton(cx,cy){
+  ctx.strokeStyle='#9a7b4a'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(cx+9,cy+11); ctx.lineTo(cx+11,cy-13); ctx.stroke(); ctx.lineWidth=1;
+  ctx.fillStyle='#cdd6e0'; ctx.beginPath(); ctx.moveTo(cx+11,cy-16); ctx.lineTo(cx+8,cy-10); ctx.lineTo(cx+14,cy-10); ctx.fill();
+  ctx.fillStyle='#8a929c'; ctx.beginPath(); ctx.arc(cx-9,cy+3,5,0,6.2832); ctx.fill(); ctx.strokeStyle='#555'; ctx.stroke();
+  ctx.fillStyle='#e8e8e0'; ctx.fillRect(cx-5,cy+2,10,9); ctx.strokeStyle='#9a9a90';
+  for(let i=0;i<3;i++){ ctx.beginPath(); ctx.moveTo(cx-4,cy+4+i*2.4); ctx.lineTo(cx+4,cy+4+i*2.4); ctx.stroke(); }
+  ctx.fillStyle='#f2f2ea'; ctx.beginPath(); ctx.arc(cx,cy-3,6,0,6.2832); ctx.fill(); ctx.strokeStyle='#aaa'; ctx.stroke();
+  ctx.fillStyle='#ff2a2a'; ctx.beginPath(); ctx.arc(cx-2.3,cy-3,1.6,0,6.2832); ctx.arc(cx+2.3,cy-3,1.6,0,6.2832); ctx.fill();
+  ctx.fillStyle='#333'; ctx.fillRect(cx-2,cy+1.5,4,2); }
+function drawOrc(cx,cy){ const g='#7f9a6a',d='#4d6340';
+  ctx.fillStyle=g; ctx.beginPath(); ctx.ellipse(cx-1,cy+4,9,8,0,0,6.2832); ctx.fill(); ctx.strokeStyle=d; ctx.lineWidth=2; ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx,cy-5,6.5,0,6.2832); ctx.fillStyle=g; ctx.fill(); ctx.stroke(); ctx.lineWidth=1;
+  ctx.fillStyle='#ff5a5a'; ctx.beginPath(); ctx.arc(cx-2.6,cy-5,1.5,0,6.2832); ctx.arc(cx+2.6,cy-5,1.5,0,6.2832); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.moveTo(cx-3,cy-1.5); ctx.lineTo(cx-2,cy+1.5); ctx.lineTo(cx-4.5,cy+0.5); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx+3,cy-1.5); ctx.lineTo(cx+2,cy+1.5); ctx.lineTo(cx+4.5,cy+0.5); ctx.fill();
+  ctx.strokeStyle='#6b5030'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(cx+9,cy+10); ctx.lineTo(cx+12,cy-9); ctx.stroke(); ctx.lineWidth=1;
+  ctx.fillStyle='#9aa3ad'; ctx.beginPath(); ctx.moveTo(cx+12,cy-11); ctx.lineTo(cx+18,cy-7); ctx.lineTo(cx+12,cy-3); ctx.closePath(); ctx.fill(); ctx.strokeStyle='#555'; ctx.stroke(); }
+function drawWolf(cx,cy){ const g='#3a3a44';
+  ctx.fillStyle=g; ctx.beginPath(); ctx.ellipse(cx-1,cy+3,11,6,0,0,6.2832); ctx.fill();
+  ctx.fillRect(cx-7,cy+7,2.5,6); ctx.fillRect(cx+4,cy+7,2.5,6);
+  ctx.beginPath(); ctx.moveTo(cx-10,cy+1); ctx.lineTo(cx-16,cy-3); ctx.lineTo(cx-9,cy+4); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx+8,cy-1,5,0,6.2832); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx+11,cy-2); ctx.lineTo(cx+17,cy+0.5); ctx.lineTo(cx+11,cy+3); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx+6,cy-5); ctx.lineTo(cx+7,cy-10); ctx.lineTo(cx+9.5,cy-5); ctx.fill();
+  ctx.strokeStyle='#22222a'; ctx.lineWidth=1; for(let i=-2;i<=1;i++){ ctx.beginPath(); ctx.moveTo(cx+i*3.5,cy-3); ctx.lineTo(cx+i*3.5,cy-7); ctx.stroke(); }
+  ctx.fillStyle='#ff3030'; ctx.beginPath(); ctx.arc(cx+8,cy-2,1.6,0,6.2832); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.moveTo(cx+14,cy+1); ctx.lineTo(cx+15,cy+3.5); ctx.lineTo(cx+12.5,cy+2); ctx.fill(); }
+function drawBKnight(cx,cy){
+  ctx.fillStyle='#6a2a8a'; ctx.beginPath(); ctx.moveTo(cx-6,cy-4); ctx.lineTo(cx-10,cy+12); ctx.lineTo(cx+7,cy+12); ctx.lineTo(cx+4,cy-4); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#3a3450'; ctx.fillRect(cx-6,cy-2,12,12); ctx.strokeStyle='#15111f'; ctx.lineWidth=1.5; ctx.strokeRect(cx-6,cy-2,12,12);
+  ctx.fillStyle='#5a4a78'; ctx.fillRect(cx-6,cy-2,12,3); ctx.lineWidth=1;
+  ctx.fillStyle='#2a2438'; ctx.beginPath(); ctx.arc(cx,cy-6,6,0,6.2832); ctx.fill();
+  ctx.fillStyle='#9098a4'; ctx.beginPath(); ctx.moveTo(cx-5,cy-9); ctx.lineTo(cx-10,cy-14); ctx.lineTo(cx-3,cy-10); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx+5,cy-9); ctx.lineTo(cx+10,cy-14); ctx.lineTo(cx+3,cy-10); ctx.fill();
+  ctx.fillStyle='#d83a3a'; ctx.fillRect(cx-3,cy-6.5,6,1.8);
+  ctx.strokeStyle='#cdd6e0'; ctx.lineWidth=2.5; ctx.beginPath(); ctx.moveTo(cx+8,cy+11); ctx.lineTo(cx+14,cy-13); ctx.stroke();
+  ctx.strokeStyle='#888'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(cx+5,cy+5); ctx.lineTo(cx+11,cy+5); ctx.stroke(); ctx.lineWidth=1; }
+function drawSorcerer(cx,cy){
+  ctx.fillStyle='#2a2438'; ctx.beginPath(); ctx.moveTo(cx-8,cy+12); ctx.lineTo(cx-5,cy-3); ctx.lineTo(cx+5,cy-3); ctx.lineTo(cx+8,cy+12); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#3f3258'; ctx.beginPath(); ctx.moveTo(cx-6,cy-1); ctx.quadraticCurveTo(cx,cy-15,cx+6,cy-1); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#0a0810'; ctx.beginPath(); ctx.ellipse(cx,cy-4,3.6,4.8,0,0,6.2832); ctx.fill();
+  ctx.fillStyle='#c060ff'; ctx.beginPath(); ctx.arc(cx-1.6,cy-4,1,0,6.2832); ctx.arc(cx+1.6,cy-4,1,0,6.2832); ctx.fill();
+  ctx.strokeStyle='#6b5030'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(cx+9,cy+12); ctx.lineTo(cx+10,cy-9); ctx.stroke(); ctx.lineWidth=1;
+  const t=clock()/120; ctx.fillStyle='#c060ff'; ctx.beginPath(); ctx.arc(cx+10,cy-11,3+Math.sin(t)*0.9,0,6.2832); ctx.fill();
+  ctx.fillStyle='#ecc0ff'; ctx.beginPath(); ctx.arc(cx+10,cy-11,1.4,0,6.2832); ctx.fill(); }
+function drawDragon(cx,cy){
+  ctx.fillStyle='#5a1818';
+  ctx.beginPath(); ctx.moveTo(cx-3,cy-2); ctx.lineTo(cx-17,cy-11); ctx.lineTo(cx-14,cy+3); ctx.lineTo(cx-4,cy+4); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx+3,cy-2); ctx.lineTo(cx+17,cy-11); ctx.lineTo(cx+14,cy+3); ctx.lineTo(cx+4,cy+4); ctx.closePath(); ctx.fill();
+  const g=ctx.createRadialGradient(cx-2,cy-1,2,cx,cy+2,11); g.addColorStop(0,'#e05a3a'); g.addColorStop(1,'#7a1f16');
+  ctx.fillStyle=g; ctx.beginPath(); ctx.ellipse(cx,cy+3,8,9,0,0,6.2832); ctx.fill();
+  ctx.fillStyle='#e8a060'; ctx.fillRect(cx-3,cy+1,6,8);
+  ctx.fillStyle='#9a2a1a'; ctx.beginPath(); ctx.arc(cx,cy-6,5.5,0,6.2832); ctx.fill();
+  ctx.fillStyle='#dddddd'; ctx.beginPath(); ctx.moveTo(cx-3,cy-9); ctx.lineTo(cx-6,cy-15); ctx.lineTo(cx-1,cy-10); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx+3,cy-9); ctx.lineTo(cx+6,cy-15); ctx.lineTo(cx+1,cy-10); ctx.fill();
+  ctx.fillStyle='#ffe000'; ctx.beginPath(); ctx.arc(cx-2,cy-6,1.4,0,6.2832); ctx.arc(cx+2,cy-6,1.4,0,6.2832); ctx.fill();
+  const t=clock()/90; ctx.fillStyle='#ffb030'; ctx.beginPath(); ctx.moveTo(cx-2,cy-3); ctx.lineTo(cx,cy+6+Math.sin(t)*1.5); ctx.lineTo(cx+2,cy-3); ctx.fill();
+  ctx.fillStyle='#fff080'; ctx.beginPath(); ctx.arc(cx,cy+1,1.4,0,6.2832); ctx.fill(); }
+function drawDemonKing(cx,cy){ const t=clock()/200;
+  ctx.fillStyle='rgba(176,16,80,'+(0.16+Math.sin(t)*0.1)+')'; ctx.beginPath(); ctx.arc(cx,cy,16,0,6.2832); ctx.fill();
+  ctx.fillStyle='#1a1020'; ctx.beginPath(); ctx.moveTo(cx-9,cy+12); ctx.lineTo(cx-7,cy-4); ctx.lineTo(cx+7,cy-4); ctx.lineTo(cx+9,cy+12); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#3a1030'; ctx.fillRect(cx-7,cy-3,14,11); ctx.strokeStyle='#b01050'; ctx.lineWidth=1.5; ctx.strokeRect(cx-7,cy-3,14,11); ctx.lineWidth=1;
+  ctx.fillStyle='#5a1838'; ctx.beginPath(); ctx.arc(cx,cy-7,6.5,0,6.2832); ctx.fill();
+  ctx.fillStyle='#e8d8c0';
+  ctx.beginPath(); ctx.moveTo(cx-5,cy-10); ctx.quadraticCurveTo(cx-15,cy-16,cx-11,cy-23); ctx.lineTo(cx-7,cy-20); ctx.quadraticCurveTo(cx-9,cy-14,cx-3,cy-11); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx+5,cy-10); ctx.quadraticCurveTo(cx+15,cy-16,cx+11,cy-23); ctx.lineTo(cx+7,cy-20); ctx.quadraticCurveTo(cx+9,cy-14,cx+3,cy-11); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#ffd700'; ctx.beginPath(); ctx.moveTo(cx-5,cy-11); ctx.lineTo(cx-5,cy-15); ctx.lineTo(cx-2,cy-12); ctx.lineTo(cx,cy-16); ctx.lineTo(cx+2,cy-12); ctx.lineTo(cx+5,cy-15); ctx.lineTo(cx+5,cy-11); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#ff3030'; ctx.beginPath(); ctx.arc(cx-2.6,cy-7,1.7,0,6.2832); ctx.arc(cx+2.6,cy-7,1.7,0,6.2832); ctx.fill();
+  ctx.strokeStyle='#cdd6e0'; ctx.lineWidth=2.5; ctx.beginPath(); ctx.moveTo(cx+9,cy+12); ctx.lineTo(cx+15,cy-13); ctx.stroke();
+  ctx.strokeStyle='rgba(255,120,30,0.8)'; ctx.lineWidth=4; ctx.beginPath(); ctx.moveTo(cx+9,cy+12); ctx.lineTo(cx+15,cy-13); ctx.stroke(); ctx.lineWidth=1; }
+const MON = { goblin:drawGoblin, skeleton:drawSkeleton, orc:drawOrc, wolf:drawWolf, bknight:drawBKnight, sorcerer:drawSorcerer, dragon:drawDragon, demonking:drawDemonKing };
+function drawMonster(px, py, u, bob) {
+  (MON[u.type] || drawGoblin)(px+16, py+18+bob, u);
+}
+function drawBurst(px, py, p) {
+  const cx=px+16, cy=py+16, R=10+p*34;
+  ctx.save(); ctx.globalAlpha=Math.max(0,1-p);
+  ctx.strokeStyle='#ffffff'; ctx.lineWidth=3; ctx.beginPath(); ctx.arc(cx,cy,R,0,Math.PI*2); ctx.stroke();
+  ctx.fillStyle='#ffd34d'; const spikes=12, rot=p*2.2;
+  for(let i=0;i<spikes;i++){ const a=rot+i*Math.PI*2/spikes, r1=R*0.45, r2=R*1.1;
+    ctx.beginPath(); ctx.moveTo(cx+Math.cos(a)*r1,cy+Math.sin(a)*r1); ctx.lineTo(cx+Math.cos(a+0.13)*r2,cy+Math.sin(a+0.13)*r2); ctx.lineTo(cx+Math.cos(a+0.26)*r1,cy+Math.sin(a+0.26)*r1); ctx.closePath(); ctx.fill(); }
+  ctx.globalAlpha=Math.max(0,0.85-p); ctx.fillStyle='#e9e9e9';
+  for(let i=0;i<7;i++){ const a=i*Math.PI*2/7+p, rr=R*0.75; ctx.beginPath(); ctx.arc(cx+Math.cos(a)*rr,cy+Math.sin(a)*rr,Math.max(1,8-p*5),0,Math.PI*2); ctx.fill(); }
+  ctx.globalAlpha=Math.max(0,1-p*1.6); ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(cx,cy,R*0.38,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function drawUnit(u, sel) {
+  const vx = u.x - camX;
+  if (vx<0||vx>=VW) return;
+  const px=vx*TS, py=u.y*TS;
+  const bob = Math.sin(clock()/320 + u.x*0.8 + u.y*0.6) * 1.3;
+  if (sel) { const pr=(Math.sin(clock()/150)*0.5+0.5); ctx.strokeStyle=`rgba(120,220,255,${0.55+pr*0.45})`; ctx.lineWidth=2.5; ctx.beginPath(); ctx.arc(px+16,py+17,14+pr*2,0,Math.PI*2); ctx.stroke(); ctx.lineWidth=1; }
+  ctx.fillStyle='rgba(0,0,0,0.28)'; ctx.beginPath(); ctx.ellipse(px+16,py+30,9,3,0,0,Math.PI*2); ctx.fill();
+  if (u.isAlly) drawHero(px,py,u,bob); else drawMonster(px,py,u,bob);
+  if (isPawn(u)) { for (let i=0;i<PROMOTE_WINS;i++){ ctx.fillStyle = i<u.wins ? '#ffe21f' : 'rgba(0,0,0,0.5)'; ctx.fillRect(px+6+i*7, py+29, 5, 3); } }
+}
+// ── S4: 護衛の可視化 ──────────────────────────────────────────────────────────
+// 王が討たれるかどうかは「隣に兵がいるか」だけで決まるのに、従来その状態は
+// ログの一行とBGMの変化でしか分からなかった（画面には何も出ていない）。
+// 誰が守っているのかを金の点線＋🛡で結び、守り手がいない時は王を赤い輪と⚠で警告する。
+// さらに無護衛のときだけ「守NN%」＝隣接している敵に攻められた場合の王の生存率を出す。
+function drawGuardLink(){
+  if (!king || !king.alive) return;
+  const kvx = king.x - camX;
+  const g = adjacentGuard();
+  const pulse = (Math.sin(clock()/220)*0.5+0.5);
+  ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+  if (g){
+    const gvx = g.x - camX;
+    if (kvx<0||kvx>=VW||gvx<0||gvx>=VW) return;
+    ctx.save();
+    ctx.globalAlpha=0.40+pulse*0.30; ctx.strokeStyle='#ffd700'; ctx.lineWidth=2; ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.moveTo(kvx*TS+16, king.y*TS+16); ctx.lineTo(gvx*TS+16, g.y*TS+16); ctx.stroke();
+    ctx.restore(); ctx.lineWidth=1;
+    ctx.font='13px sans-serif'; ctx.fillStyle='#ffd700'; ctx.fillText('🛡', gvx*TS+16, g.y*TS+1);
+    return;
+  }
+  if (kvx<0||kvx>=VW) return;
+  ctx.save();
+  ctx.strokeStyle=`rgba(255,70,70,${0.45+pulse*0.45})`; ctx.lineWidth=2.5;
+  ctx.beginPath(); ctx.arc(kvx*TS+16, king.y*TS+17, 15+pulse*3, 0, Math.PI*2); ctx.stroke();
+  ctx.restore(); ctx.lineWidth=1;
+  ctx.font='13px sans-serif'; ctx.fillStyle='#ff6b6b'; ctx.fillText('⚠', kvx*TS+16, king.y*TS+1);
+  // 隣接している敵に殴られたら王は何%で生き残るか（無護衛＝負けたらそのまま討たれる）
+  let sv = 2;
+  for (const e of livingEnemies()){
+    if (Math.max(Math.abs(e.x-king.x), Math.abs(e.y-king.y))!==1) continue;
+    sv = Math.min(sv, 1-atkWinPct(e, king));
+  }
+  if (sv<=1){
+    const pct=Math.round(sv*100), col = pct>=60?'#8dff6b':pct>=40?'#ffd700':'#ff6b6b';
+    const px=kvx*TS, py=king.y*TS, txt='守'+pct+'%', bw=42;
+    ctx.fillStyle='rgba(0,0,0,0.75)'; ctx.fillRect(px+16-bw/2,py+TS-2,bw,13);
+    ctx.strokeStyle=col; ctx.lineWidth=1; ctx.strokeRect(px+16-bw/2+0.5,py+TS-1.5,bw-1,12);
+    ctx.fillStyle=col; ctx.font='bold 11px Courier New'; ctx.fillText(txt, px+16, py+TS+8);
+  }
+}
+function drawControlPanel() {
+  const y0=6; let x=8;
+  ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(4,4,300,22);
+  ctx.font='bold 13px Courier New'; ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+  CONTROL.forEach((m,i)=>{
+    const w = m.label.length*13 + 12;
+    if (i===controlIdx) { const pr=(Math.sin(clock()/150)*0.5+0.5); ctx.fillStyle=`rgba(120,220,255,${0.45+pr*0.4})`; ctx.fillRect(x-2,y0-1,w,18); ctx.fillStyle='#08121a'; }
+    else ctx.fillStyle='#9bbace';
+    ctx.fillText(m.label, x+3, y0+13);
+    x += w + 3;
+  });
+  ctx.fillStyle='#7d93a6'; ctx.font='11px Courier New'; ctx.fillText('SPACEで操作切替', x+6, y0+13);
+}
+// ── 進軍の章立て：地方バナー（S2/S5）。ゲームは止めず、上に流れて消える ──
+function showBanner(name, lore){ banner = {name, lore, born:clock()}; }
+function checkRegion(){
+  while (regionIdx < REGIONS.length-1 && king.alive && king.x >= REGIONS[regionIdx+1].x){
+    regionIdx++;
+    const r = REGIONS[regionIdx];
+    showBanner(r.name, r.lore);
+    addLog('― 第'+(regionIdx+1)+'章《'+r.name+'》― '+r.lore);
+    flash(0.16,'255,220,120'); shake(3);
+    try{ Music.regionJingle(); }catch(e){}
+    snapshotChapter();                       // S3: この章の入口を関所として保存（王が討たれてもここへ戻れる）
+    noteDeepest();                           // S5: 最深到達章を永続記録
+  }
+}
+function drawBanner(){
+  if (!banner) return;
+  const t=(clock()-banner.born)/1000;
+  if (t>3.4){ banner=null; return; }
+  const a = t<0.3 ? t/0.3 : t>2.8 ? Math.max(0,(3.4-t)/0.6) : 1;
+  ctx.save(); ctx.globalAlpha=a;
+  const bh=94, by=H/2-47;
+  const g=ctx.createLinearGradient(0,by,0,by+bh);
+  g.addColorStop(0,'rgba(10,8,26,0)'); g.addColorStop(0.16,'rgba(12,10,30,0.84)');
+  g.addColorStop(0.84,'rgba(12,10,30,0.84)'); g.addColorStop(1,'rgba(10,8,26,0)');
+  ctx.fillStyle=g; ctx.fillRect(0,by,W,bh);
+  ctx.strokeStyle='rgba(255,215,90,0.5)'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(W*0.09,by+9); ctx.lineTo(W*0.91,by+9);
+  ctx.moveTo(W*0.09,by+bh-9); ctx.lineTo(W*0.91,by+bh-9); ctx.stroke(); ctx.lineWidth=1;
+  ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+  ctx.fillStyle='#9ad'; ctx.font='13px Courier New'; ctx.fillText('第 '+(regionIdx+1)+' 章', W/2, by+26);
+  ctx.fillStyle='#ffd700'; ctx.font='bold 30px Courier New'; ctx.fillText(banner.name, W/2, by+58);
+  ctx.fillStyle='#dce6ff'; ctx.font='14px Courier New'; ctx.fillText(banner.lore, W/2, by+82);
+  ctx.restore();
+}
+function render() {
+  if (gameState==='title') { renderTitle(); drawFlash(); return; }
+  ctx.clearRect(0,0,W,H);
+  updateCam();
+  let _sx=0,_sy=0;
+  if (shakeAmt>0.3){ _sx=(Math.random()-0.5)*shakeAmt*2; _sy=(Math.random()-0.5)*shakeAmt*2; shakeAmt*=0.86; } else shakeAmt=0;
+  ctx.save(); ctx.translate(Math.round(_sx),Math.round(_sy));
+  for (let vy=0; vy<VH; vy++) for (let vx=0; vx<VW; vx++) { const mx=vx+camX; if (mx<MW) drawTile(vx, vy, mx, vy); }
+  ctx.font='26px sans-serif'; ctx.textAlign='center';
+  { const vx = 1 - camX;      if (vx>=0 && vx<VW) ctx.fillText('🏰', vx*TS+16, KY0*TS+28); }
+  { const vx = (MW-2) - camX; if (vx>=0 && vx<VW) ctx.fillText('🏯', vx*TS+16, EKY*TS+28); }
+  const sel = new Set(controlledUnits());
+  units.filter(u=>u.alive&&!u.isAlly).forEach(u=>drawUnit(u,false));
+  units.filter(u=>u.alive&& u.isAlly).forEach(u=>drawUnit(u, sel.has(u)));
+  drawGuardLink();                     // S4: 誰が王を守っているか／守り手がいないかを常時表示
+  // 勝率プレビュー：いま選択中の隊が隣接している敵に、攻撃したときの勝率（囲み込み）を頭上表示
+  { const ctrl = controlledUnits();
+    for (const e of livingEnemies()) {
+      const vx = e.x - camX; if (vx<0||vx>=VW) continue;
+      let best=-1, bestF=1;
+      for (const a of ctrl) { if (Math.abs(a.x-e.x)+Math.abs(a.y-e.y)===1){ const p=atkWinPct(a,e); if(p>best){ best=p; bestF=typeFactor(a,e); } } }
+      if (best<0) continue;
+      const px=vx*TS, py=e.y*TS, pct=Math.round(best*100);
+      const mark = bestF>1?'▲':bestF<1?'▼':'';
+      const txt = pct+'%'+mark, bw = mark?36:26;
+      const col = pct>=60?'#8dff6b':pct>=40?'#ffd700':'#ff6b6b';
+      ctx.fillStyle='rgba(0,0,0,0.7)'; ctx.fillRect(px+16-bw/2,py-13,bw,13);
+      ctx.strokeStyle=col; ctx.lineWidth=1; ctx.strokeRect(px+16-bw/2+0.5,py-12.5,bw-1,12);
+      ctx.fillStyle=col; ctx.font='bold 11px Courier New'; ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+      ctx.fillText(txt, px+16, py-3);
+    }
+  }
+  for (const ef of effects) { const vx = ef.x - camX; if (vx>=0 && vx<VW) drawBurst(vx*TS, ef.y*TS, Math.min(1,(clock()-ef.born)/ef.dur)); }
+  // 進捗バー＋6章の関所マーカー：魔王城までの距離と今どこかが一目で分かる（視認性・目的の明確化）
+  const prog = (king.alive ? king.x : (deathX!==null?deathX:0))/(MW-1);
+  ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(0,H-7,W,7);
+  ctx.fillStyle='#ffd700';           ctx.fillRect(0,H-7,Math.round(W*prog),7);
+  for (let i=1;i<REGIONS.length;i++){                       // 各章の境目に関所の刻み（通過済みは明るく）
+    const mx = Math.round(REGIONS[i].x/(MW-1)*W);
+    ctx.fillStyle = regionIdx>=i ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.4)';
+    ctx.fillRect(mx-1, H-10, 2, 10);
+  }
+  { ctx.fillStyle='#b01050'; ctx.font='11px sans-serif'; ctx.textAlign='right'; ctx.textBaseline='alphabetic'; ctx.fillText('🏯', W-2, H-9); } // 終点＝魔王城
+  { const lbl='第'+(regionIdx+1)+'章 '+REGIONS[regionIdx].name;   // 現在の章を常時表示（迷子防止）
+    ctx.font='bold 12px Courier New'; ctx.textAlign='left';
+    const lw = ctx.measureText(lbl).width + 14;
+    ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(4,H-28,lw,16);
+    ctx.fillStyle='#ffd27a'; ctx.fillText(lbl, 10, H-16); }
+  drawControlPanel();
+  ctx.fillStyle='rgba(0,0,0,0.45)'; ctx.fillRect(W-96,4,92,18);
+  ctx.fillStyle='#fff'; ctx.font='12px Courier New'; ctx.textAlign='left';
+  ctx.fillText((Music.isOn()?'♪ON':'♪OFF')+' (Mキー)', W-92, 17);
+  updateGuide(); drawGuide();          // S1: はじめの一手（初回のみ・1行だけ）
+  drawBanner();
+  drawBattleCine();
+  if (gameState==='win')  renderOverlay('🎉 VICTORY! 🎉','#ffd700', true);
+  if (gameState==='lose') renderOverlay('YOUR KING IS DEAD','#ff3b3b', false);
+  if (gameState==='continue') renderContinue();
+  ctx.restore();
+  drawFlash();
+}
+function renderTitle() {
+  const g=ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#1a1140'); g.addColorStop(1,'#3a1a55');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  for (let i=0; i<80; i++) { ctx.fillStyle=`rgba(255,255,255,${0.1+(Math.sin(i*99.7+clock()/500)*0.5+0.5)*0.4})`; ctx.fillRect((i*137%W), (i*89%(H-20))+10, 2,2); }
+  ctx.textAlign='center';
+  ctx.fillStyle='#ffd700'; ctx.font='bold 54px Courier New'; ctx.fillText('ゾロゾロ大進軍', W/2, 118);
+  ctx.fillStyle='#9ad'; ctx.font='14px Courier New'; ctx.fillText('inspired by ASCII 1983', W/2, 142);
+  ctx.fillStyle='#ffb0b0'; ctx.font='14px Courier New';
+  ctx.fillText('魔王オゴレスに滅ぼされた祖国を取り戻すため、大将は二人の従者と進軍を始めた。', W/2, 166);
+  ctx.fillText('道々で出会う民兵を仲間にし、大軍へと育てながら、遥か東の魔王城を目指せ。', W/2, 188);
+  const info = [
+    ['#7ec8e3','矢印キー/画面下の十字ボタンで移動 ／ SPACE・操作切替ボタンで対象切替'],
+    ['#bfe','操作対象: 大将・痩せ・太っちょ・全体（左上に表示・選択中は発光）'],
+    ['#ffd700','🌲🪨 ほのかに光る木や岩を調べると仲間が隠れている'],
+    ['#9be37a','仲間は痩せ型／太っちょ。勝てば黄色戦士に昇格'],
+    ['#8dff6b','⚔ 隣接で勝率%表示(▲有利/▼不利)。自分から踏み込まず迎え撃つのがコツ'],
+    ['#ffd27a','⚖ 相性: 太っちょ→敵兵 / 痩せ→敵騎士 / 戦士・王→敵王 に強い'],
+    ['#ffb0b0','👑 護衛＝王の隣の兵だけが身代わり。🛡の金線で守り手を常時表示（⚠=無防備）'],
+    ['#fff2a0','⭐ 伝説の勇者は大将の隊に加わり一緒に動かせる（最強）'],
+    ['#5cc8ff','💧 湖は通れない。詰まっても焦らず動ける兵から進む（詰みなし）'],
+    ['#f7a','🚩 王が討たれても関所コンティニュー！直前の章から'+RETRY_MAX+'回まで再挑戦'],
+    ['#ff66ff','敵は8種(ゴブリン〜魔王)！魔王オゴレスを倒せ ♪ Mキーで音楽'],
+  ];
+  // S1: 全部読まなくていい、と最初に言う。読まずに始めても画面上端が1行ずつ案内する。
+  ctx.fillStyle='#8dff6b'; ctx.font='bold 15px Courier New';
+  ctx.fillText(record.taught ? '▶ 下は読み飛ばしてよい。とにかく東へ進めば道は開ける'
+                             : '▶ 下は読まなくてよい。始めれば画面の上が「はじめの一手」を1つずつ教える', W/2, 208);
+  info.forEach(([color, text], i) => { ctx.fillStyle=color; ctx.font='14px Courier New'; ctx.fillText(text, W/2, 226+i*21); });
+  ctx.fillStyle = record.bestTurns!==null ? '#ffe27a' : '#7d93a6';
+  ctx.font='14px Courier New';
+  ctx.fillText(record.bestTurns!==null
+    ? `🏆 自己ベスト:${record.bestTurns}ターン（通算${record.wins}勝${record.losses}敗）` + (record.bestRank?`　最高評価:${record.bestRank}`:'')
+    : '🏆 自己ベスト: まだ撃破記録なし　― 速く・兵を多く連れて凱旋しSランクを狙え', W/2, 462);
+  // S5: 到達最深章と称号（負けた日の分も残る＝「今度はもっと奥へ」の物差し）
+  { const dp = record.deepest||0;
+    ctx.font='14px Courier New'; ctx.fillStyle = dp>0 ? '#ffd27a' : '#7d93a6';
+    const t1 = dp>0 ? `🏳 最深到達: 第${dp}章《${REGIONS[Math.min(dp,REGIONS.length)-1].name}》` : '🏳 最深到達: まだ旗は立っていない';
+    const t2 = record.noCont ? '　🏵 称号『不撓の進軍』' : '　🏵 称号『不撓の進軍』＝ノーコンティニュー制覇で獲得';
+    ctx.fillText(t1 + t2, W/2, 486); }
+  const blink = (clock()/500|0)%2===0;
+  ctx.fillStyle = blink ? '#ffd700' : '#666'; ctx.font='bold 24px Courier New';
+  ctx.fillText('スペース / クリックでスタート', W/2, 522);
+}
+// ── S3: 関所コンティニュー画面（王が討たれた＝終わり、ではない）────────────────
+function renderContinue() {
+  ctx.fillStyle='rgba(0,0,0,0.80)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+  const ri = chapterSave ? chapterSave.region : 0, r = REGIONS[ri];
+  ctx.fillStyle='#ff3b3b'; ctx.font='bold 44px Courier New'; ctx.fillText('YOUR KING IS DEAD', W/2, H/2-116);
+  ctx.fillStyle='#dce6ff'; ctx.font='15px Courier New';
+  ctx.fillText('大将は倒れた。だが掲げた旗は、まだ倒れていない――', W/2, H/2-80);
+  ctx.fillText('直近の関所まで退けば、そこにいた兵ごと隊を組み直してやり直せる。', W/2, H/2-56);
+  ctx.fillStyle='#8dff6b'; ctx.font='bold 25px Courier New';
+  ctx.fillText('⚔ 第'+(ri+1)+'章《'+r.name+'》の関所から再挑戦', W/2, H/2-8);
+  ctx.fillStyle='#ffd700'; ctx.font='16px Courier New';
+  ctx.fillText('（1周につき'+RETRY_MAX+'回まで ／ 残り '+continuesLeft+' 回）', W/2, H/2+20);
+  ctx.fillStyle='#9bbace'; ctx.font='14px Courier New';
+  ctx.fillText(`ここまで ${turn}ターン ／ 到達 第${regionIdx+1}章` + (record.deepest?`（最深記録 第${record.deepest}章）`:''), W/2, H/2+48);
+  const blink=(clock()/500|0)%2===0;
+  ctx.fillStyle = blink ? '#fff' : '#7d93a6'; ctx.font='bold 18px Courier New';
+  ctx.fillText('スペース ／ 画面クリック ／ 十字ボタン → 再挑戦', W/2, H/2+86);
+  ctx.fillStyle='#9bbace'; ctx.font='14px Courier New';
+  ctx.fillText('Rキー ／「操作切替」ボタン → ここで進軍を終える（1敗として記録）', W/2, H/2+114);
+  ctx.fillStyle='#7d93a6'; ctx.font='12px Courier New';
+  ctx.fillText('※再挑戦するたび戦績ランクは1段下がる。無傷の制覇には称号『不撓の進軍』', W/2, H/2+142);
+}
+function renderOverlay(text, color, isWin) {
+  ctx.fillStyle='rgba(0,0,0,0.72)'; ctx.fillRect(0,0,W,H);
+  if (isWin) drawWinConfetti();
+  ctx.textAlign='center';
+  ctx.fillStyle=color; ctx.font='bold 54px Courier New'; ctx.fillText(text, W/2, H/2-84);
+  // S2: 結末は「どこで終わったか」で変わる。勝利=3行の凱旋譚／敗北=倒れた章の書き下ろし2行。
+  const lines = isWin ? WIN_EPILOGUE
+                      : (REGIONS[regionIdx] && REGIONS[regionIdx].end) || ['大将は倒れた。だが集めた兵たちの記憶は、次の進軍へと引き継がれる…'];
+  ctx.fillStyle='#dce6ff'; ctx.font='15px Courier New';
+  const ey = H/2 - (isWin ? 58 : 52);
+  lines.forEach((s,i)=> ctx.fillText(s, W/2, ey + i*21));
+  ctx.fillStyle='#fff'; ctx.font='22px Courier New'; ctx.fillText(`ターン数: ${turn}   兵: ${troopCount()}${hasChampion()?' +勇者':''}`, W/2, H/2+10);
+  ctx.font='16px Courier New';
+  if (isWin) {
+    ctx.fillStyle = newRecord ? '#8dff6b' : '#9bbace';
+    ctx.fillText(newRecord ? `🏆 自己ベスト更新！ ${turn}ターンで撃破（通算${record.wins}勝）` : `自己ベスト: ${record.bestTurns}ターンで撃破（通算${record.wins}勝${record.losses}敗）`, W/2, H/2+42);
+    if (lastRank) {   // 戦績ランク：この一戦の評価＋励ましの一言（次の目標を提示）
+      ctx.fillStyle = RANK_COL[lastRank]; ctx.font='bold 34px Courier New';
+      ctx.fillText('評価  '+lastRank+'ランク' + (newBestRank?'  ★自己最高！':''), W/2, H/2+82);
+      ctx.fillStyle='#dce6ff'; ctx.font='14px Courier New';
+      ctx.fillText(RANK_MSG[lastRank] + (continuesUsed>0?`（コンティニュー${continuesUsed}回で-${continuesUsed}）`:''), W/2, H/2+106);
+    }
+    // S5: 称号『不撓の進軍』＝一度も関所へ戻らずに魔王を討った証（永続）
+    if (continuesUsed===0){
+      ctx.fillStyle='#ffd700'; ctx.font='bold 17px Courier New';
+      ctx.fillText('🏵 称号『不撓の進軍』' + (newTitle?' ★初獲得！':'  ノーコンティニュー制覇'), W/2, H/2+132);
+    } else {
+      ctx.fillStyle='#7d93a6'; ctx.font='14px Courier New';
+      ctx.fillText('称号『不撓の進軍』は一度も関所へ戻らず魔王を討つと得られる', W/2, H/2+132);
+    }
+    if (lastRank && WIN_LAST[lastRank]) {   // S2: ランクごとに変わる結びの一文（凱旋の後日談）
+      ctx.fillStyle='#c9b8ff'; ctx.font='italic 14px Courier New';
+      ctx.fillText(WIN_LAST[lastRank], W/2, H/2+154);
+    }
+  } else {
+    ctx.fillStyle='#9bbace';
+    ctx.fillText(`通算 ${record.wins}勝${record.losses}敗` + (record.bestTurns!==null?`／自己ベスト${record.bestTurns}ターン`:''), W/2, H/2+42);
+    ctx.fillStyle='#ffd27a'; ctx.font='15px Courier New';
+    ctx.fillText(`🏳 今回の到達: 第${regionIdx+1}章《${REGIONS[regionIdx].name}》　最深記録: 第${record.deepest||1}章`, W/2, H/2+70);
+  }
+  ctx.fillStyle='#aaa'; ctx.font='16px Courier New'; ctx.fillText('スペース / クリックでリスタート', W/2, H/2+(isWin?186:104));
+}
+// ── BGM: 4場面のシーケンサ（タイトル/行軍/戦闘/魔王）＋マーチSFX ─────────────
+const Music = (function(){
+  let ac=null, master=null, on=true, iv=null, step=0, mode='march', danger=false;
+  const TEMPO = { title:88, march:128, battle:128, boss:152, pinch:150 };   // 場面ごとの速さ
+  const stepMsOf = m => 60000/TEMPO[m]/2;
+  const mid = n => 440*Math.pow(2,(n-69)/12);
+  const LEAD = [76,79,81,79, 74,79,83,74, 72,76,81,72, 77,81,79,76]; // upper voice
+  const HARM = [72,72,76,76, 71,71,79,67, 67,72,77,67, 72,77,76,72]; // lower voice (duet)
+  const CHORDS = [[60,64,67],[60,64,67],[55,59,62],[55,59,62],[57,60,64],[57,60,64],[53,57,60],[53,57,60],
+                  [60,64,67],[60,64,67],[55,59,62],[55,59,62],[57,60,64],[57,60,64],[53,57,60],[53,57,60]];
+  const BLEAD = [69,69,72,72, 68,68,72,72, 69,69,76,76, 75,75,72,72];
+  // タイトル：亡国の大将が一人で旅立つ、遅くて重い決意のテーマ（短調→長調で希望を残す）
+  const TLEAD  = [64,0,67,0, 71,0,72,0, 71,0,67,0, 64,0,0,0];   // 0=休符
+  const TCHORD = [[52,55,59],[52,55,59],[52,55,59],[52,55,59],[48,52,55],[48,52,55],[48,52,55],[48,52,55],
+                  [50,53,57],[50,53,57],[50,53,57],[50,53,57],[47,50,55],[47,50,55],[47,50,55],[47,50,55]];
+  // 魔王オゴレス戦：半音でにじり寄る低音＋速いキック。雑魚戦とは別物の圧
+  const KLEAD = [64,63,64,66, 64,63,61,63, 64,63,64,68, 67,66,64,63];
+  const KBASS = [40,40,41,40, 40,40,39,40, 40,40,41,40, 42,42,41,40];
+  // M5: 統一モチーフ SIG = E–G–B。タイトル「亡国のテーマ」の冒頭そのもので、
+  // 出撃・章の幕開け・勇者の合流・関所からの再起・凱旋の全てに顔を出す＝この作品の音。
+  const SIG = [64,67,71];
+  // 王の危機：SIGを短調へ崩して急かす旋律＋心拍のような低音（護衛ゼロで敵が迫った時だけ）
+  const PLEAD = [64,67,71,67, 63,67,70,67, 64,67,71,74, 72,71,67,63];
+  const PBASS = [40,40,40,40, 39,39,39,39, 40,40,40,40, 41,41,40,40];
+  function tone(freq,dur,type,vol){ const t=ac.currentTime+0.02, o=ac.createOscillator(), g=ac.createGain();
+    o.type=type; o.frequency.value=freq; g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(vol,t+0.012);
+    g.gain.exponentialRampToValueAtTime(0.0006,t+dur); o.connect(g).connect(master); o.start(t); o.stop(t+dur+0.03); }
+  function kick(v){ const t=ac.currentTime+0.02, o=ac.createOscillator(), g=ac.createGain();
+    o.frequency.setValueAtTime(150,t); o.frequency.exponentialRampToValueAtTime(50,t+0.11);
+    g.gain.setValueAtTime(v||0.8,t); g.gain.exponentialRampToValueAtTime(0.001,t+0.13); o.connect(g).connect(master); o.start(t); o.stop(t+0.14); }
+  function nz(vol,ftype,freq,dur,q){ const t=ac.currentTime+0.02, b=ac.createBuffer(1,2048,ac.sampleRate), d=b.getChannelData(0);
+    for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1; const s=ac.createBufferSource(); s.buffer=b;
+    const f=ac.createBiquadFilter(); f.type=ftype; f.frequency.value=freq; if(q) f.Q.value=q; const g=ac.createGain();
+    g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(0.001,t+dur); s.connect(f).connect(g).connect(master); s.start(t); s.stop(t+dur+0.02); }
+  function tick(){
+    if(!ac) return;
+    if(mode==='title'){
+      const ch=TCHORD[step];
+      if(step%4===0){ tone(mid(ch[0]-12),0.9,'triangle',0.20); ch.forEach(n=>tone(mid(n),0.85,'sawtooth',0.035)); } // 厚いパッド
+      if(TLEAD[step]) { tone(mid(TLEAD[step]),0.5,'square',0.07); tone(mid(TLEAD[step]-12),0.5,'triangle',0.05); } // 二声の旋律
+      if(step%8===0) kick(0.5);
+    } else if(mode==='boss'){
+      nz(0.34,'bandpass', step%2===0?520:900, 0.10, 1.2);
+      kick(0.9);                                              // 全ステップの重い鼓動
+      tone(mid(KBASS[step]),0.16,'sawtooth',0.20);
+      tone(mid(KLEAD[step]),0.08,'square',0.07);
+      if(step%4===0) tone(mid(KLEAD[step]-12),0.22,'sawtooth',0.09);
+      if(step%8===6) nz(0.22,'highpass',5000,0.06);
+    } else if(mode==='pinch'){
+      // 危機：鼓動が半分の速さで打ち、旋律だけが早足になる（行軍マーチとは別物の焦り）
+      if(step%2===0) kick(0.55);
+      tone(mid(PBASS[step]),0.14,'sawtooth',0.17);
+      tone(mid(PLEAD[step]),0.09,'square',0.065);
+      if(step%4===0) tone(mid(PLEAD[step]-12),0.20,'triangle',0.07);
+      if(step%8===7) nz(0.13,'highpass',4200,0.05);
+    } else if(mode==='battle'){
+      nz(0.30,'bandpass', step%2===0?760:1020, 0.11, 0.8);
+      if (step%2===0) kick(0.85);
+      tone(mid(45),0.14,'sawtooth',0.16);
+      tone(mid(BLEAD[step]),0.06,'square',0.05);
+      if (step%4===2) nz(0.18,'highpass',6000,0.04);
+    } else {
+      const ch=CHORDS[step];
+      tone(mid(ch[0]-12),0.22,'triangle',0.22);            // bass
+      if(step%2===1) ch.forEach(n=>tone(mid(n),0.15,'sawtooth',0.04)); // soft chord pad
+      tone(mid(LEAD[step]), 0.20,'square',  0.075);        // voice 1
+      tone(mid(HARM[step]), 0.20,'triangle',0.085);        // voice 2 (duet)
+      if(step%4===0) kick(0.7);
+      if(step%8===4) nz(0.22,'highpass',1500,0.16);
+      if(step%2===1) nz(0.09,'highpass',8000,0.03);
+    }
+    step=(step+1)%16;
+  }
+  // epoch: 曲の掛け直しのたびに進む世代番号。ジングル後の遅延復帰が、
+  // その間にリスタートされた新しい曲を乗っ取らないための番人。
+  let epoch=0;
+  function stopLoop(){ epoch++; if(iv){ clearInterval(iv); iv=null; } }
+  function runLoop(){ stopLoop(); step=0; iv=setInterval(tick, stepMsOf(mode)); }   // 場面ごとのテンポで鳴らし直す
+  // テンポが変わる場面だけ鳴らし直す（同テンポなら小節の流れを切らない）
+  function useMode(m){ const old=mode; if(old===m) return; mode=m; if(ac&&iv&&TEMPO[old]!==TEMPO[m]) runLoop(); }
+  // ── M3: 戦績ランクの叙勲ファンファーレ（S=豪華な三段／C=短く控えめ＝評価が耳で分かる）──
+  const RANK_FANFARE = {
+    S: {seq:[[72,76,79],[76,79,84],[79,84,88]], gap:190, dur:0.55, vol:0.13, kicks:3},
+    A: {seq:[[72,76,79],[76,79,84]],            gap:200, dur:0.50, vol:0.12, kicks:2},
+    B: {seq:[[67,72,76]],                       gap:220, dur:0.55, vol:0.11, kicks:1},
+    C: {seq:[[60,64,67]],                       gap:220, dur:0.45, vol:0.09, kicks:0},
+  };
+  function rankFanfare(rank){
+    const f = RANK_FANFARE[rank] || RANK_FANFARE.C;
+    f.seq.forEach((ch,i)=> setTimeout(()=>{ try{ if(!ac) return;
+      ch.forEach(n=> tone(mid(n), f.dur, 'square', f.vol));
+      tone(mid(ch[0]-12), f.dur, 'triangle', f.vol*0.8);
+      if(i<f.kicks) kick(0.6);
+    }catch(e){} }, i*f.gap));
+    if(rank==='S') setTimeout(()=>{ try{ if(ac){ nz(0.16,'highpass',6000,0.3); [88,91,96].forEach((n,i)=> setTimeout(()=>{ try{ tone(mid(n),0.25,'triangle',0.08); }catch(e){} }, i*70)); } }catch(e){} }, f.seq.length*f.gap+120);
+  }
+  // ── M4: 危機に落ちた瞬間の警鐘／脱した瞬間の安堵（どちらも切り替わりの一度きり）──
+  function alarmSfx(){ try{ if(!ac) return;
+    [0,320].forEach(d=> setTimeout(()=>{ try{ if(!ac) return;
+      tone(mid(81),0.15,'square',0.10);
+      setTimeout(()=>{ try{ if(ac) tone(mid(75),0.22,'square',0.09); }catch(e){} },150);
+    }catch(e){} }, d));
+    nz(0.12,'bandpass',1400,0.20,1.4);
+  }catch(e){} }
+  function reliefSfx(){ try{ if(!ac) return;                 // M5: モチーフSIGが安堵として鳴る
+    SIG.forEach((n,i)=> setTimeout(()=>{ try{ if(ac) tone(mid(n+12),0.16,'triangle',0.075); }catch(e){} }, i*70));
+  }catch(e){} }
+  return {
+    ensure(m){ try{
+      if(!ac){ const AC=window.AudioContext||window.webkitAudioContext; if(!AC) return;
+        ac=new AC(); master=ac.createGain(); master.gain.value=on?0.2:0; master.connect(ac.destination); }
+      if(ac.state==='suspended') ac.resume();
+      if(!iv){ if(m) mode=m; runLoop(); } else if(m) useMode(m);
+    }catch(e){} },
+    setMode(m){ try{ useMode(m); }catch(e){} },
+    toggle(){ on=!on; if(master) master.gain.value = on?0.2:0;
+      if(on&&ac) try{ tone(mid(72),0.10,'square',0.08); setTimeout(()=>{ try{ tone(mid(79),0.12,'square',0.07); }catch(e){} },90); }catch(e){} },   // M4: ♪ONに戻した確認音
+    isOn(){ return on; },
+    // 魔王オゴレス戦だけは専用トラックへ（雑魚戦と同じ曲だった問題の解消）
+    enterBattle(isBoss){ useMode(isBoss?'boss':'battle');
+      try{ if(ac){ nz(0.4,'bandpass',isBoss?520:700,0.18,0.7); kick(0.95); } }catch(e){} },
+    exitBattle(){ useMode(danger?'pinch':'march'); },        // 危機のまま戦闘を抜けたら危機の曲へ戻る
+    // ── M2: 5つ目の場面「王の危機」。護衛ゼロで敵が迫ると行軍マーチが危機の曲に変わる ──
+    setDanger(f){ try{
+      f = !!f; if(f===danger) return; danger=f;
+      if(mode==='march'||mode==='pinch') useMode(f?'pinch':'march');   // 戦闘/魔王/タイトル中は割り込まない
+      if(f) alarmSfx(); else reliefSfx();
+    }catch(e){} },
+    inDanger(){ return danger; },
+    // M4: 進軍の足音／操作対象の切替音
+    stepSfx(){ if(!ac) return; try{ nz(0.10,'bandpass',420,0.05,1.4); tone(mid(48),0.05,'triangle',0.05); }catch(e){} },
+    switchSfx(){ if(!ac) return; try{ tone(mid(76),0.06,'square',0.07); setTimeout(()=>{ try{ tone(mid(83),0.07,'square',0.06); }catch(e){} },55); }catch(e){} },
+    // ── M4: 戦い・発見・操作のフィードバック（全て既存 tone/kick/nz 経由＝master 0.20の音量基準を維持）──
+    clashSfx(){ if(!ac) return; try{                       // 決着の瞬間の剣戟（金属の打ち合い）
+      nz(0.28,'bandpass',2600,0.09,3.0); nz(0.14,'highpass',5200,0.05);
+      tone(mid(88),0.05,'square',0.05);
+    }catch(e){} },
+    defeatSfx(allyWon){ if(!ac) return; try{                // 剣戟の直後(150ms)に勝敗が音で分かる
+      if(allyWon) setTimeout(()=>{ try{                     // 敵を討ち取った：砕ける低音＋抜ける二音
+        kick(0.7); nz(0.22,'lowpass',900,0.20);
+        [72,79].forEach((n,i)=> setTimeout(()=>{ try{ tone(mid(n),0.13,'square',0.085); }catch(e){} }, i*70));
+      }catch(e){} },150);
+      else setTimeout(()=>{ try{                            // 味方が倒れた：力なく落ちる二音
+        [57,50].forEach((n,i)=> setTimeout(()=>{ try{ tone(mid(n),0.30,'sawtooth',0.10); }catch(e){} }, i*130));
+        nz(0.13,'lowpass',420,0.28);
+      }catch(e){} },150);
+    }catch(e){} },
+    guardSfx(){ if(!ac) return; try{                        // 護衛が身代わり：盾で受け止める鈍い金属音
+      setTimeout(()=>{ try{ nz(0.26,'bandpass',900,0.16,2.2); tone(mid(52),0.22,'triangle',0.14); tone(mid(59),0.12,'square',0.05); }catch(e){} },220);
+    }catch(e){} },
+    blockSfx(){ if(!ac) return; try{                        // その方向へ動けない：押し返される鈍い低音
+      tone(mid(41),0.10,'triangle',0.13); nz(0.12,'lowpass',300,0.09);
+    }catch(e){} },
+    searchSfx(){ if(!ac) return; try{                       // 茂み/岩をかき分ける（誰かが潜んでいる気配）
+      nz(0.16,'bandpass',1800,0.14,1.0); setTimeout(()=>{ try{ nz(0.11,'bandpass',2600,0.10,1.2); }catch(e){} },110);
+    }catch(e){} },
+    menuSfx(){ if(!ac) return; try{                         // 出撃・リスタートの決定音（M5: モチーフSIG）
+      SIG.forEach((n,i)=> setTimeout(()=>{ try{ tone(mid(n+12),0.14,'square',0.085); }catch(e){} }, i*78));
+    }catch(e){} },
+    // ── M3: 節目のジングル ────────────────────────────────────────────────────
+    allyJingle(){ if(!ac) return; try{                      // 仲間が加わった（勇者より控えめな三音の合流）
+      [64,71,76].forEach((n,i)=> setTimeout(()=>{ try{ tone(mid(n),0.18,'triangle',0.11); if(i===2) tone(mid(n+12),0.14,'square',0.04); }catch(e){} }, i*80));
+    }catch(e){} },
+    // 章の幕開け：短い角笛のファンファーレ（新たな地方へ入る合図）
+    regionJingle(){ if(!ac) return; try{                    // M5: 角笛もモチーフSIGで吹く
+      SIG.forEach((n,i)=> setTimeout(()=>{ try{ tone(mid(n),0.3,'triangle',0.10); tone(mid(n+7),0.24,'square',0.04); }catch(e){} }, i*95));
+    }catch(e){} },
+    // M3: 最深到達の更新＝新たな地に旗が立つ（きらめき＋モチーフの高音で締める）
+    deepestJingle(){ if(!ac) return; try{
+      nz(0.11,'highpass',6500,0.22);
+      SIG.concat([76]).forEach((n,i)=> setTimeout(()=>{ try{ if(ac) tone(mid(n+12),0.18,'triangle',0.085); }catch(e){} }, i*85));
+    }catch(e){} },
+    // M3: 関所コンティニュー＝倒れた王が立ち上がる（低い決意の三音 → モチーフSIGで再出発）
+    continueJingle(){ if(!ac) return; try{
+      [48,52,55].forEach((n,i)=> setTimeout(()=>{ try{ if(ac) tone(mid(n),0.26,'triangle',0.12); }catch(e){} }, i*110));
+      SIG.forEach((n,i)=> setTimeout(()=>{ try{ if(ac){ tone(mid(n),0.20,'square',0.10); tone(mid(n-12),0.18,'triangle',0.06); } }catch(e){} }, 380+i*95));
+      setTimeout(()=>{ try{ if(ac) kick(0.6); }catch(e){} }, 665);
+    }catch(e){} },
+    // ── M3: short dedicated jingles for level-up moments ──────────────────────
+    promoteJingle(){ if(!ac) return; try{
+      [72,76,79,84].forEach((n,i)=> setTimeout(()=>{ try{ tone(mid(n),0.16,'square',0.11); }catch(e){} }, i*55));
+    }catch(e){} },
+    championJingle(){ if(!ac) return; try{                  // M5: モチーフSIGから駆け上がる勇者の登場
+      SIG.concat([76,79,84,88]).forEach((n,i)=> setTimeout(()=>{ try{ tone(mid(n),0.22,'triangle',0.12); tone(mid(n+12),0.15,'square',0.05); }catch(e){} }, i*70));
+    }catch(e){} },
+    winJingle(rank){ try{ stopLoop(); mode='march'; danger=false; const g=epoch; if(!ac) return;
+      const notes=SIG.concat([72,76,79,84]);                 // M5: 凱旋もモチーフSIGから始まる
+      notes.forEach((n,i)=> setTimeout(()=>{ try{ tone(mid(n),0.35,'square',0.14); tone(mid(n-12),0.3,'triangle',0.09); }catch(e){} }, i*90));
+      setTimeout(()=>{ try{ [72,76,79,84].forEach(n=>tone(mid(n),0.9,'triangle',0.1)); kick(0.6); }catch(e){} }, notes.length*90+40);
+      // M3: 戦績ランクの叙勲ファンファーレ（画面の評価S/A/B/Cと音の豪華さが一致する）
+      setTimeout(()=>{ try{ if(ac&&g===epoch) rankFanfare(rank); }catch(e){} }, notes.length*90+820);
+      // 祝勝の行進：勝利画面が無音になっていたのでマーチへ戻す（リスタート済みなら何もしない）
+      setTimeout(()=>{ try{ if(ac&&g===epoch){ mode='march'; runLoop(); } }catch(e){} }, notes.length*90+2600);
+    }catch(e){} },
+    loseJingle(){ try{ stopLoop(); mode='march'; danger=false; const g=epoch; if(!ac) return;
+      const notes=[57,55,53,48];
+      notes.forEach((n,i)=> setTimeout(()=>{ try{ tone(mid(n),0.5,'sawtooth',0.12); }catch(e){} }, i*220));
+      setTimeout(()=>{ try{ tone(mid(45),1.1,'sawtooth',0.1); nz(0.15,'lowpass',300,0.6); }catch(e){} }, notes.length*220+60);
+      // 敗北画面には「亡国のテーマ」が静かに戻ってくる（無音だった場面を物語で埋める）
+      setTimeout(()=>{ try{ if(ac&&g===epoch){ mode='title'; runLoop(); } }catch(e){} }, notes.length*220+1500);
+    }catch(e){} }
+  };
+})();
+// ── Input ─────────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  Music.ensure(gameState==='title'?'title':null);
+  if (e.code==='KeyM') { Music.toggle(); e.preventDefault(); return; }
+  if (gameState === 'continue') {                       // 関所コンティニューの選択
+    if (e.code==='Space'||e.code==='Enter'){ e.preventDefault(); continueChapter(); }
+    else if (e.code==='KeyR') giveUp();
+    return;
+  }
+  if (gameState !== 'play') { if (e.code==='Space'||e.code==='Enter') init(); return; }
+  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','KeyA','KeyD','KeyW','KeyS','Space'].includes(e.code)) e.preventDefault();
+  if (e.code==='Space') { cycleControl(); return; }   // switch controlled group
+  if (busy) return;
+  switch(e.code) {
+    case 'ArrowLeft':  case 'KeyA': commandMove(-1, 0); break;
+    case 'ArrowRight': case 'KeyD': commandMove( 1, 0); break;
+    case 'ArrowUp':    case 'KeyW': commandMove( 0,-1); break;
+    case 'ArrowDown':  case 'KeyS': commandMove( 0, 1); break;
+  }
+});
+C.addEventListener('click', () => { Music.ensure(gameState==='title'?'title':null);
+  if (gameState === 'continue') { continueChapter(); updateCtrlName(); return; }
+  if (gameState !== 'play') init(); });
+// ── タッチ操作（スマホ）：十字ボタンで移動・操作切替ボタンでSPACE相当 ──
+const DIRV = { up:[0,-1], down:[0,1], left:[-1,0], right:[1,0] };
+function updateCtrlName(){ const el=document.getElementById('ctrlName'); if(el) el.textContent = CONTROL[controlIdx].label; }
+document.querySelectorAll('#dpad button').forEach(btn => {
+  btn.addEventListener('pointerdown', e => {
+    e.preventDefault(); Music.ensure(gameState==='title'?'title':null);
+    if (gameState === 'continue') { continueChapter(); updateCtrlName(); return; }   // 十字ボタン＝再挑戦
+    if (gameState !== 'play') { init(); updateCtrlName(); return; }
+    const [dx,dy] = DIRV[btn.dataset.dir]; commandMove(dx, dy);
+  });
+});
+document.getElementById('btnSwitch').addEventListener('pointerdown', e => {
+  e.preventDefault(); Music.ensure(gameState==='title'?'title':null);
+  if (gameState === 'continue') { giveUp(); return; }   // 「操作切替」＝ここで進軍を終える
+  if (gameState !== 'play') { init(); updateCtrlName(); return; }
+  if (busy) return;
+  cycleControl(); updateCtrlName();
+});
+// ── Main loop ─────────────────────────────────────────────────────────────────
+function loop(){ render(); requestAnimationFrame(loop); }
+gameState = 'title';
+loop();
+</script>
+</body>
+</html>

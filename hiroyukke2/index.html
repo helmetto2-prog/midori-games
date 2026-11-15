@@ -1,0 +1,1790 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>ひろゆっけ２ 〜論破クエスト〜</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#0c1024; display:flex; flex-direction:column; align-items:center; justify-content:center;
+         min-height:100vh; padding:6px; font-family:'Segoe UI','MS PGothic',sans-serif;
+         -webkit-text-size-adjust:100%; overscroll-behavior:none; }
+  canvas { display:block; box-shadow:0 0 36px rgba(120,150,255,0.3); border-radius:8px; cursor:pointer;
+           width:100%; max-width:480px; height:auto; touch-action:manipulation; -webkit-tap-highlight-color:transparent; }
+  #hint { color:#8aa; font-size:12px; margin-top:8px; text-align:center; line-height:1.5; }
+  @media (max-width:520px){ #hint { font-size:11px; } }
+</style>
+</head>
+<body>
+<canvas id="c" width="480" height="720"></canvas>
+<div id="hint">📱スマホ: 画面を直接タップ（カード・わざ・どうぐ・ガード）<br>⌨️PC: カード=クリック/123 ／ Q=わざ W=どうぐ G=ガード Space=必殺 ／ R リスタート M 音 P ポーズ</div>
+<div id="errbar" style="display:none;position:fixed;left:0;right:0;bottom:0;background:#c62828;color:#fff;font:12px Consolas,monospace;padding:6px 10px;z-index:99;white-space:pre-wrap"></div>
+<script>
+function showErr(m){ try{ var e=document.getElementById('errbar'); e.style.display='block';
+  if (e.textContent.indexOf(m)<0) e.textContent+=m+'\n'; }catch(_){} }
+window.onerror=function(msg,src,line,col){ showErr(msg+' @'+line+':'+col); };
+window.addEventListener('unhandledrejection',function(ev){ showErr('Promise: '+(ev.reason&&ev.reason.message||ev.reason)); });
+</script>
+<script>
+'use strict';
+/* =========================================================================
+   ENGINE
+   ========================================================================= */
+const C = document.getElementById('c'), ctx = C.getContext('2d');
+const W = C.width, H = C.height, TAU = Math.PI*2;
+const clock = () => performance.now();
+const clamp = (v,a,b) => v<a?a:v>b?b:v;
+const lerp  = (a,b,t) => a+(b-a)*t;
+const randi = n => Math.random()*n|0;
+const rngPick = arr => arr[randi(arr.length)];
+
+let state = 'title';
+let G = null;
+
+// ---- Input ---------------------------------------------------------------
+const Input = (function(){
+  const keys=new Set(), edge=new Set();
+  const BLOCK=['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'];
+  document.addEventListener('keydown', e=>{ SFX.ensure();
+    if (BLOCK.includes(e.code)) e.preventDefault();
+    if (!keys.has(e.code)) edge.add(e.code); keys.add(e.code); onKey(e.code); });
+  document.addEventListener('keyup', e=>keys.delete(e.code));
+  return { held:c=>keys.has(c), pressed:c=>edge.has(c), clearEdges:()=>edge.clear() };
+})();
+
+// ---- SFX + BGM -------------------------------------------------------------
+const SFX = (function(){
+  let ac=null, master=null, on=true, bgmIv=null, bgmStep=0, bgmMode='kid';
+  const midi = n => 440*Math.pow(2,(n-69)/12);
+  // 論破ゲームの「声」：相手ごとに音色・音程が違い、しゃべると誰か分かる（DQ/UNDERTALE風ボイス）
+  const VOICEPROF = {
+    hiro:  { base:300, type:'square',   spread:2.0, vol:0.030 },  // ひろゆっけ＝低め・平坦・淡々
+    kid:   { base:470, type:'square',   spread:3.4, vol:0.034 },  // ガキ大将＝高く跳ねる
+    mind:  { base:400, type:'triangle', spread:2.4, vol:0.030 },  // 意識高い系＝澄んだ早口
+    rich:  { base:205, type:'sawtooth', spread:1.6, vol:0.038 },  // 成金＝低くドスの利いた
+    mirror:{ base:288, type:'square',   spread:2.2, vol:0.030 },  // 闇ひろゆっけ＝本人より半音低い
+  };
+  const VWAVE = [0,3,-2,5,-1,2,-3,4];  // しゃべりの抑揚（半音オフセット）
+  function tone(f,d,type,v){ if(!ac) return; const t=ac.currentTime+0.01, o=ac.createOscillator(), g=ac.createGain();
+    o.type=type; o.frequency.value=f; g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(v,t+0.01);
+    g.gain.exponentialRampToValueAtTime(0.0006,t+d); o.connect(g).connect(master); o.start(t); o.stop(t+d+0.03); }
+  function slide(f0,f1,d,type,v){ if(!ac) return; const t=ac.currentTime+0.01, o=ac.createOscillator(), g=ac.createGain();
+    o.type=type; o.frequency.setValueAtTime(f0,t); o.frequency.exponentialRampToValueAtTime(f1,t+d);
+    g.gain.setValueAtTime(v,t); g.gain.exponentialRampToValueAtTime(0.0006,t+d); o.connect(g).connect(master); o.start(t); o.stop(t+d+0.03); }
+  function noise(v,freq,d){ if(!ac) return; const t=ac.currentTime+0.01, b=ac.createBuffer(1,2048,ac.sampleRate), dt=b.getChannelData(0);
+    for(let i=0;i<dt.length;i++) dt[i]=Math.random()*2-1; const s=ac.createBufferSource(); s.buffer=b;
+    const f=ac.createBiquadFilter(); f.type='bandpass'; f.frequency.value=freq; const g=ac.createGain();
+    g.gain.setValueAtTime(v,t); g.gain.exponentialRampToValueAtTime(0.001,t+d); s.connect(f).connect(g).connect(master); s.start(t); s.stop(t+d+0.05); }
+  // 場面別BGM：相手ごとに曲調が変わり（教室=無邪気/公園=気取り/道ばた=成金の派手さ）、
+  // 大詰め（ミラー戦・相手瀕死）はboss、こちらのメンタル瀕死はpinchで感情を先導する
+  const BGM = {
+    kid:  { tempo:160, lt:'square',   bt:'triangle', lg:0.045, bg:0.085, drum:'light',
+            lead:[72,72,74,76, 76,74,72,74, 71,71,72,74, 74,72,71,null,
+                  69,71,72,74, 76,76,74,72, 74,72,74,76, 77,null,76,null],
+            bass:[48,null,48,null, 43,null,43,null, 41,null,41,null, 43,null,43,null,
+                  45,null,45,null, 41,null,41,null, 43,null,43,null, 48,null,48,null] },
+    mind: { tempo:185, lt:'triangle', bt:'triangle', lg:0.06,  bg:0.075, drum:'soft',
+            lead:[76,79,81,79, 76,74,72,74, 72,74,76,79, 77,74,72,null,
+                  74,77,79,77, 74,72,71,72, 69,72,76,74, 72,71,69,null],
+            bass:[45,52,48,52, 41,48,45,48, 43,50,47,50, 45,52,48,52,
+                  40,47,43,47, 41,48,45,48, 43,50,47,50, 45,null,45,null] },
+    rich: { tempo:150, lt:'sawtooth', bt:'square',   lg:0.04,  bg:0.08,  drum:'punch',
+            lead:[79,79,79,76, 79,83,83,81, 79,76,74,76, 79,null,79,null,
+                  81,81,81,79, 81,84,84,83, 81,79,76,79, 84,null,83,null],
+            bass:[43,43,50,43, 43,43,50,43, 45,45,52,45, 43,43,50,43,
+                  41,41,48,41, 43,43,50,43, 45,45,52,45, 43,43,43,43] },
+    boss: { tempo:120, lt:'square',   bt:'triangle', lg:0.055, bg:0.10,  drum:'boss',
+            lead:[69,72,75,76, 75,72,69,68, 69,72,76,79, 78,76,72,69,
+                  71,74,77,80, 79,77,74,71, 80,79,77,76, 75,73,72,71],
+            bass:[45,45,45,46, 45,45,45,44, 50,50,50,51, 50,50,50,49,
+                  52,52,52,53, 52,52,52,51, 45,45,48,46, 45,44,45,47] },
+    pinch:{ tempo:108, lt:'square',   bt:'sawtooth', lg:0.05,  bg:0.09,  drum:'urgent',
+            lead:[69,68,69,71, 69,68,67,68, 69,68,69,71, 72,71,69,68,
+                  67,66,67,69, 67,66,65,66, 67,68,69,71, 72,73,72,71],
+            bass:[45,45,45,45, 44,44,44,44, 45,45,45,45, 43,43,43,43,
+                  41,41,41,41, 40,40,40,40, 43,43,43,43, 44,44,45,46] },
+  };
+  function bgmInterval(){ return (BGM[bgmMode]||BGM.kid).tempo; }
+  function tickBGM(){ if(!ac) return; const m=BGM[bgmMode]||BGM.kid, i=bgmStep%32;
+    const L=m.lead[i], B=m.bass[i], d=m.drum;
+    if(B!=null) tone(midi(B-12), m.tempo<140?0.16:0.22, m.bt, m.bg);
+    if(L!=null) tone(midi(L),0.16, m.lt, m.lg);
+    if(d==='boss'){ if(L!=null&&i%2===0) tone(midi(L-12),0.12,'sawtooth',0.04);
+      if(i%8===0){ tone(midi(33),0.55,'sawtooth',0.05); tone(midi(39),0.55,'sawtooth',0.035); }
+      if(i%4===2) noise(0.07,2000,0.04); if(i%2===0) noise(0.03,1100,0.03); if(i%8===0) noise(0.14,150,0.11);
+    } else if(d==='urgent'){ if(L!=null&&i%2===0) tone(midi(L-12),0.10,'square',0.035);
+      if(i%4===0) noise(0.12,180,0.10); if(i%2===0) noise(0.05,1400,0.04); if(i%8===4) tone(midi(31),0.5,'sawtooth',0.05);
+    } else if(d==='punch'){ if(i%4===0) noise(0.11,200,0.08); if(i%4===2) noise(0.06,1500,0.04); if(i%8===0) tone(midi(43),0.3,'square',0.05);
+    } else if(d==='soft'){ if(i%8===0) noise(0.05,300,0.10); if(i%4===2) noise(0.02,2000,0.03);
+    } else { if(i%8===0) noise(0.10,220,0.09); else if(i%2===0) noise(0.02,1700,0.03); }
+    bgmStep=(bgmStep+1)%32;
+  }
+  return {
+    get on(){ return on; },
+    ensure(){ try{ if(!ac){ const A=window.AudioContext||window.webkitAudioContext; if(!A) return;
+      ac=new A(); master=ac.createGain(); master.gain.value=on?0.2:0; master.connect(ac.destination); }
+      if(ac.state==='suspended') ac.resume(); }catch(e){} },
+    toggle(){ on=!on; if(master) master.gain.value=on?0.2:0; },
+    startBGM(mode){ this.ensure(); this.stopBGM(); bgmMode=mode||'kid'; bgmStep=0; if(ac) bgmIv=setInterval(tickBGM,bgmInterval()); },
+    setBGMMode(mode){ if(mode===bgmMode||!bgmIv) return; bgmMode=mode; clearInterval(bgmIv); bgmIv=setInterval(tickBGM,bgmInterval()); },
+    stopBGM(){ if(bgmIv){ clearInterval(bgmIv); bgmIv=null; } },
+    talk(){ tone(300+randi(60),0.05,'square',0.04); },
+    // 一文字ぶんの「声」。prof=hiro/kid/mind/rich/mirror、iで抑揚が変わる
+    voice(prof,i){ if(!ac) return; const P=VOICEPROF[prof]||VOICEPROF.hiro;
+      const w=VWAVE[(i||0)%VWAVE.length]*(P.spread/3);
+      tone(P.base*Math.pow(2,w/12),0.05,P.type,P.vol); noise(P.vol*0.35,3200,0.02); },
+    // 短いセリフを n 音ぶん続けてしゃべる（吹き出しが一気に出る場面用）
+    say(prof,n){ if(!ac) return; n=n||3; for(let k=0;k<n;k++){ const kk=k; setTimeout(()=>this.voice(prof,kk),k*62); } },
+    beat(){ tone(200,0.08,'triangle',0.05); noise(0.03,600,0.05); },
+    tick(){ tone(880,0.03,'square',0.04); },
+    zap(n){ const b=520*Math.pow(1.1,(n||1)-1); tone(b,0.09,'square',0.1); tone(b*1.5,0.14,'square',0.08); noise(0.12,2200,0.06); },
+    dull(){ tone(240,0.1,'triangle',0.06); },
+    buzz(){ noise(0.25,300,0.18); tone(140,0.18,'sawtooth',0.09); },
+    cutin(){ slide(300,1200,0.18,'square',0.08); noise(0.1,2600,0.1); },
+    appear(){ slide(150,600,0.25,'triangle',0.09); tone(660,0.12,'square',0.06); },
+    defeat(){ slide(800,120,0.5,'sawtooth',0.12); noise(0.3,400,0.35); },
+    heal(){ [72,76,79].forEach((m,i)=>setTimeout(()=>tone(midi(m),0.15,'triangle',0.08), i*90)); },
+    lvup(){ const seq=[60,64,67,72,76];
+      seq.forEach((m,i)=>setTimeout(()=>{ tone(midi(m),0.16,'square',0.1); tone(midi(m-5),0.14,'triangle',0.045); }, i*90));
+      setTimeout(()=>{ tone(midi(88),0.3,'square',0.08); noise(0.08,3000,0.15); }, seq.length*90+40); },   // DQ風レベルアップ（二声化+きらめき追加）
+    coin(){ tone(1180,0.06,'square',0.06); tone(1580,0.1,'square',0.05); },
+    buy(){ tone(880,0.07,'square',0.07); tone(1320,0.1,'triangle',0.05); },
+    menu(){ tone(1040,0.04,'square',0.05); },
+    guard(){ tone(320,0.12,'triangle',0.08); noise(0.06,900,0.08); },
+    eSpecial(){ slide(900,180,0.5,'sawtooth',0.13); noise(0.2,500,0.3); },
+    crowd(){ noise(0.1,1200,0.35); noise(0.08,800,0.4); },
+    comboFinish(){ [76,79,84].forEach((m,i)=>setTimeout(()=>{ tone(midi(m),0.14,'square',0.1); tone(midi(m+7),0.12,'triangle',0.05); }, i*70));
+      setTimeout(()=>{ noise(0.15,2400,0.2); tone(midi(96),0.2,'square',0.06); }, 260); },   // 3連続クリティカル専用ジングル
+    special(){ [60,64,67,72,76].forEach((m,i)=>setTimeout(()=>{ tone(midi(m),0.22,'square',0.13); tone(midi(m+12),0.18,'triangle',0.06); }, i*80));
+      setTimeout(()=>{ noise(0.3,1800,0.25); slide(1400,300,0.4,'sawtooth',0.1); }, 420); },
+    win(){ const seq=[60,64,67,72,76,79,84];
+      seq.forEach((m,i)=>setTimeout(()=>{ tone(midi(m),0.24,'square',0.12); tone(midi(m-12),0.22,'triangle',0.06); }, i*115));
+      setTimeout(()=>{ [60,64,67,72].forEach(m=>tone(midi(m),0.9,'triangle',0.08)); tone(midi(84),1.0,'square',0.07); }, seq.length*115+80); },
+    lose(){ const seq=[67,63,60,55,48];
+      seq.forEach((m,i)=>setTimeout(()=>tone(midi(m),0.3,'sawtooth',0.13), i*150));
+      setTimeout(()=>{ tone(midi(36),1.1,'sawtooth',0.1); tone(midi(43),1.1,'triangle',0.06); noise(0.08,220,0.6); }, seq.length*150+60); },
+  };
+})();
+
+// ---- FX --------------------------------------------------------------------
+let hitstopT=0;
+function hitstop(ms){ hitstopT=Math.max(hitstopT,ms); }
+const FX = (function(){
+  let parts=[], shake=0, nums=[], rings=[];
+  function star(cx,cy,r,rot){ ctx.beginPath();
+    for(let i=0;i<5;i++){ const a=rot+i*TAU/5-Math.PI/2, a2=rot+(i+0.5)*TAU/5-Math.PI/2;
+      const px=cx+Math.cos(a)*r, py=cy+Math.sin(a)*r, qx=cx+Math.cos(a2)*r*0.42, qy=cy+Math.sin(a2)*r*0.42;
+      if(i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py); ctx.lineTo(qx,qy); }
+    ctx.closePath(); }
+  return {
+    burst(x,y,col,count,spd,shapes){ count=count||8; spd=spd||1; for(let i=0;i<count;i++){ const a=Math.random()*TAU, s=(1.5+Math.random()*3.5)*spd;
+      parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-1.5,col:col||'#fff',life:0,dur:0.4+Math.random()*0.4,
+        rot:Math.random()*TAU,vr:(Math.random()-0.5)*0.3,star:shapes==='star'&&Math.random()<0.5,sz:2.4+Math.random()*2.4}); } },
+    shake(amt){ shake=Math.max(shake,amt); },
+    ring(x,y,col,r0){ rings.push({x,y,r:r0||8,life:0,dur:0.38,col:col||'#fff'}); },
+    popup(x,y,text,col,size){ nums.push({x,y,text,col:col||'#fff',size:size||20,life:0,dur:0.85,vy:-1.5+Math.random()*-0.4}); },
+    update(dt){ const f=dt/16;
+      for(const p of parts){ p.life+=dt/1000; p.x+=p.vx*f; p.y+=p.vy*f; p.vy+=0.35*f; p.rot+=p.vr*f; }
+      parts=parts.filter(p=>p.life<p.dur);
+      for(const r of rings){ r.life+=dt/1000; r.r+=(70)*f/16*1; }
+      rings=rings.filter(r=>r.life<r.dur);
+      for(const n of nums){ n.life+=dt/1000; n.y+=n.vy*f; n.vy=Math.min(n.vy+0.03*f,-0.3); }
+      nums=nums.filter(n=>n.life<n.dur);
+      shake=Math.max(0,shake-dt/16); },
+    preDraw(){ if(shake>0){ ctx.save(); ctx.translate((Math.random()-0.5)*shake,(Math.random()-0.5)*shake); } },
+    postDraw(){ if(shake>0) ctx.restore();
+      for(const r of rings){ ctx.save(); ctx.globalAlpha=Math.max(0,1-r.life/r.dur)*0.8;
+        ctx.strokeStyle=r.col; ctx.lineWidth=3; ctx.beginPath(); ctx.arc(r.x,r.y,r.r,0,TAU); ctx.stroke(); ctx.restore(); }
+      for(const p of parts){ ctx.save(); ctx.globalAlpha=Math.max(0,1-p.life/p.dur);
+        ctx.fillStyle=p.col;
+        if(p.star){ ctx.translate(p.x,p.y); star(0,0,p.sz*1.8,p.rot); ctx.fill(); }
+        else { ctx.beginPath(); ctx.arc(p.x,p.y,p.sz,0,TAU); ctx.fill(); }
+        ctx.restore(); }
+      for(const n of nums){ const p=n.life/n.dur, pop=p<0.18?(p/0.18):1;
+        ctx.save(); ctx.globalAlpha=Math.max(0,1-Math.max(0,p-0.55)/0.45);
+        ctx.textAlign='center'; ctx.font='bold '+Math.round(n.size*(0.7+0.3*pop))+'px "Segoe UI"';
+        ctx.fillStyle='rgba(0,0,0,0.45)'; ctx.fillText(n.text,n.x+2,n.y+2);
+        ctx.fillStyle=n.col; ctx.fillText(n.text,n.x,n.y);
+        ctx.restore(); } },
+    clear(){ parts=[]; shake=0; nums=[]; rings=[]; },
+  };
+})();
+
+// ---- Store（file://のlocalStorage例外ガード） -------------------------------
+const Store = { key:'hiroyuki2_best', mem:0,
+  get(){ try{ return +(localStorage.getItem(this.key)||0); }catch(e){ return this.mem; } },
+  set(v){ this.mem=v; try{ localStorage.setItem(this.key,v); }catch(e){} } };
+const StoreRank = { key:'hiroyuki2_rank', mem:'',
+  get(){ try{ return localStorage.getItem(this.key)||''; }catch(e){ return this.mem; } },
+  set(v){ this.mem=v; try{ localStorage.setItem(this.key,v); }catch(e){} } };
+// 到達最深話（負けた日も残る物差し）と称号『無敗の論客』＝ノーコンティニュー制覇
+const StoreDeep = { key:'hiroyuki2_deep', mem:0,
+  get(){ try{ return +(localStorage.getItem(this.key)||0); }catch(e){ return this.mem; } },
+  set(v){ this.mem=v; try{ localStorage.setItem(this.key,v); }catch(e){} } };
+const StoreNoCon = { key:'hiroyuki2_nocon', mem:0,
+  get(){ try{ return +(localStorage.getItem(this.key)||0); }catch(e){ return this.mem; } },
+  set(v){ this.mem=v; try{ localStorage.setItem(this.key,v); }catch(e){} } };
+// 📓くせノート＝論破した論客の「口ぐせの内訳」を書きとめる永続コレクション（4人ぶんのビット）
+// 一度書きとめた相手とは、次の周から 👁読みメモ に くせの棒グラフ が出る＝周回のごほうび。
+const StoreNote = { key:'hiroyuki2_note', mem:0,
+  get(){ try{ return +(localStorage.getItem(this.key)||0); }catch(e){ return this.mem; } },
+  set(v){ this.mem=v; try{ localStorage.setItem(this.key,v); }catch(e){} } };
+// 🐢じっくりモード＝考える時間をのばし、仕切りなおしの回数も増やす（永続設定）
+const StoreSlow = { key:'hiroyuki2_slow', mem:0,
+  get(){ try{ return +(localStorage.getItem(this.key)||0); }catch(e){ return this.mem; } },
+  set(v){ this.mem=v; try{ localStorage.setItem(this.key,v); }catch(e){} } };
+function markDeep(idx){ const d=idx+1; if (d>StoreDeep.get()) StoreDeep.set(d); }
+function noteHas(i){ return (StoreNote.get() >> i) & 1; }
+function noteCount(){ let n=0, b=StoreNote.get(); for (let i=0;i<4;i++) if ((b>>i)&1) n++; return n; }
+function noteAdd(i){ const b=StoreNote.get(); if (!((b>>i)&1)) StoreNote.set(b | (1<<i)); }
+function slowOn(){ return StoreSlow.get()===1; }
+
+function rrect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+function overlay(title,col,sub,sub2){ ctx.fillStyle='rgba(0,0,0,0.68)'; ctx.fillRect(0,0,W,H); ctx.textAlign='center';
+  ctx.fillStyle=col; ctx.font='bold 40px "Segoe UI"'; ctx.fillText(title,W/2,H/2-24);
+  ctx.fillStyle='#ddd'; ctx.font='15px "Segoe UI"'; ctx.fillText(sub,W/2,H/2+18);
+  if (sub2){ ctx.fillStyle='#9fb0e8'; ctx.font='14px "Segoe UI"'; ctx.fillText(sub2,W/2,H/2+46); } }
+
+let lastT=0;
+function loop(t){ const dt = lastT ? Math.min(50,t-lastT) : 16; lastT=t;
+  if (hitstopT>0){ hitstopT=Math.max(0,hitstopT-dt); requestAnimationFrame(loop); return; }
+  try {
+    if (state==='play') update(dt);
+    FX.update(dt); render(); Input.clearEdges();
+  } catch(err){ showErr(err.message+' ['+((err.stack||'').split('\n')[1]||'').trim()+']'); }
+  requestAnimationFrame(loop); }
+
+/* =========================================================================
+   ==== GAME ====  ひろゆっけ２ 〜論破クエスト〜 v07
+   DQ風RPG化: Lv/EXP/G・メッセージ窓・どうぐ・ショップ・敵必殺・デッキ構築
+   タイプ推理(2戦目から？？？)・観客・ゲージ2択・裏ボス「ひろゆっけミラー」
+   ========================================================================= */
+const CONFIG = {
+  myMax:100,
+  tameMs:250, replyMs:560, holdMs:180, resultMs:900,
+  introMs:1700, defeatMs:1500, enemyAtkMs:1700, eventMs:2600,
+  selectMs:9000,
+  gaugeMax:100, healBetween:20,
+  retryMax:2,                      // 1周につき「その話の頭から」やり直せる回数
+  slowMul:1.7,                     // 🐢じっくりモードの持ち時間倍率（9秒→15.3秒）
+  slowRetry:4,                     // 🐢じっくりモードの仕切りなおし回数
+};
+Store.key = 'hiroyuki2_best';
+
+const TAGS = {
+  emotion:   { name:'感情論',   col:'#ff6b9d' },
+  nodata:    { name:'データなし', col:'#5aa6ff' },
+  dodge:     { name:'論点ずらし', col:'#ffb347' },
+  authority: { name:'権威',     col:'#b58bff' },
+};
+const TAGKEYS = Object.keys(TAGS);
+const HIDDEN_TAG = { name:'？？？', col:'#666e85' };
+
+const ARGS = {
+  emotion: ['みんなそう言ってますよ！','普通に考えておかしいでしょ！','常識的にありえないって！','なんかムカつくんですよ！'],
+  nodata: ['絶対にこっちが正しいです','間違いなくそうなんです','誰が見てもそうですよね','これはもう確定なんです'],
+  dodge: ['でも昔あなた失敗しましたよね','そもそもあなた誰ですか？','その言い方は失礼です','話を変えないでください'],
+  authority: ['専門家が言ってました','テレビでやってましたよ','偉い人もそう言ってます','本に書いてありました'],
+};
+
+// ---- カード（デッキ制）------------------------------------------------------
+function baseDeck(){ return [
+  { text:'それってあなたの\n感想ですよね', strong:'emotion', mul:1,
+    bubbles:['それってあなたの感想ですよね。','それって、あなたがそう思うってだけですよね。'] },
+  { text:'データ\nあるんですか？', strong:'nodata', mul:1,
+    bubbles:['なんかそういうデータあるんですか？','ソースは？あるなら出してください。'] },
+  { text:'論点\nずらさないで', strong:'dodge', mul:1,
+    bubbles:['論点ずらさないでもらっていいですか。','いま、その話してないですよね。'] },
+  { text:'その専門家\n誰ですか？', strong:'authority', mul:1,
+    bubbles:['その専門家って、誰ですか？','テレビが言ってたら正しいんですか？'] },
+  { text:'嘘つくの\nやめて', strong:null, mul:1,
+    bubbles:['嘘つくのやめてもらっていいですか。','あなたの中ではそうなんでしょうね。'] },
+  { text:'ただの\n決めつけ', strong:null, mul:1,
+    bubbles:['それ、ただの決めつけですよね。','根拠、ゼロですよね。'] },
+].map(c=>Object.assign({},c)); }
+
+// 撃破報酬カード（3枚提示→1枚選択）
+const REWARD_CARDS = [
+  { text:'完全\n論破', strong:null, wild:true, mul:1.2, badge:'万能',
+    bubbles:['それ、完全に論破できますけど。','どの角度からでも論破できますよ。'] },
+  { text:'ソースは\nおいら', strong:'nodata', mul:1.5,
+    bubbles:['ソースはおいらです。おいらが見たんで。'] },
+  { text:'逆に\n質問', strong:'dodge', mul:1.2, gaugeB:15,
+    bubbles:['逆に聞きますけど、なんでですか？'] },
+  { text:'うそはうそと\n見抜く', strong:'authority', mul:1.3, drain:25,
+    bubbles:['うそをうそであると見抜ける人でないと難しい。'] },
+  { text:'感想\nおかわり', strong:'emotion', mul:1.4,
+    bubbles:['それも、あなたの感想ですよね。'] },
+  { text:'はい\n撤収', strong:null, mul:1, heal:15,
+    bubbles:['はい、この話おわり。おつかれさまでした。'] },
+];
+
+// ---- どうぐ＆ショップ --------------------------------------------------------
+const ITEMS = {
+  herb:   { name:'やくそう',       price:40, desc:'メンタルを 40 かいふく', icon:'🌿' },
+  sand:   { name:'ときのすな',     price:60, desc:'このターンの じかん +6びょう', icon:'⏳' },
+  redraw: { name:'スペアカード',   price:50, desc:'てふだを ひきなおす', icon:'🃏' },
+  charm:  { name:'まもりのおふだ', price:70, desc:'てきの ひっさつを 1かい むこうか', icon:'🧿' },
+};
+const SHOP_STOCK = ['herb','sand','redraw','charm'];
+
+const OPENERS = ['なんだろう…','うーん、','逆に、','えっと、','あの、','ちなみに、','別にいいんですけど、','おいらの意見だと、','というか、','よく分かんないんですけど、'];
+const TAUNT_CRIT = ['はい、論破。','で、データは？','それ感想ですよね。','効いちゃいました？','なんかすみません。','論理破綻してますよ。','それ、答えになってないです。','はい、終了。','泣かないでくださいね。','おいらの勝ちでよくないですか？'];
+const TAUNT_MILD = ['まあ、そうですよね。','はい。','うん、なるほど。','ふーん、そうなんですね。','別に否定はしないです。','なるほど、で？'];
+const COMEBACK   = ['はぐらかさないで！','それ論点ずらしです！','ちゃんと答えてよ！','効いてないですけど？'];
+const TIMEOUT_TAUNTS = ['だんまりですか？（笑）','答えられないんだ〜？','時間切れでーす！','沈黙は敗北ですよ？'];
+const SPECIAL_LINES = ['はい、論破。','はい、それ完全に論破。','これ、もう論破でよくないですか？'];
+const HURT_LINES = ['あれ、おかしいな…','いや、そういう意味じゃなくて…','ちょっと噛み合わなかったですね…','（今のはちょっと効いた…）','え、そこ怒るんですか。'];
+const TIMEOUT_HURT = ['（え、もう時間ですか）','（ぼーっとしてました）','（動画見てて聞いてなかった）'];
+const INTRO_REPLIES = ['どうも、ひろゆっけです。','あ、はい。よろしくお願いします。','別に負ける気しないんですけど。','おいらでよければ相手しますよ。'];
+const DEFEAT_COMMENTS = ['おつかれさまでした。','まあ、そうなりますよね。','はい、次の方どうぞ。','最初から無理だったんですよ。'];
+const MUTTERS = {
+  emotion:   ['（感情的になってるなぁ）','（気持ちは分かるんですけどね）','（それ、気分の問題ですよね）'],
+  nodata:    ['（根拠、言ってないな）','（断言してるだけっぽいな）','（数字が出てこないんだよなぁ）'],
+  dodge:     ['（話そらそうとしてるな）','（それ今の話と関係なくない？）','（人格攻撃きたな）'],
+  authority: ['（「誰かが言ってた」ばっかりだな）','（肩書きに弱いタイプかな）','（自分の意見はないのかな）'],
+};
+
+// ---- 敵ロスター（4連戦・必殺技つき） -----------------------------------------
+const ENEMIES = [
+  { name:'ガキ大将タケシ', style:'kid',  scene:'classroom', hp:70,  atk:11, exp:30, gold:60, gaugeRate:16,
+    intro:'おまえなんか学級会で泣かすからな！', defeat:'う、うわ〜ん！おぼえてろよ〜！',
+    spName:'なきおとし', spWarn:'タケシは なきそうな かおを している…' },
+  { name:'意識高い系レン', style:'mind', scene:'park',      hp:95,  atk:14, exp:50, gold:90, gaugeRate:18,
+    intro:'僕、エビデンスベースで詰めるタイプなんで。', defeat:'り、リスケしましょ…この議論…',
+    spName:'ヨコモジラッシュ', spWarn:'レンの メガネが あやしく ひかった…' },
+  { name:'成金社長ゴウ',   style:'rich', scene:'street',    hp:120, atk:17, exp:80, gold:150, gaugeRate:20,
+    intro:'ワシに口ごたえとは、ええ度胸や。', defeat:'ば、バカな…ワシが論破されるとは…！',
+    spName:'さつたばビンタ', spWarn:'ゴウは さつたばを にぎりしめた…' },
+  { name:'ひろゆっけミラー', style:'mirror', scene:'studio',  hp:150, atk:20, exp:150, gold:300, gaugeRate:22,
+    intro:'それってあなたの感想ですよね。', defeat:'なるほど、完敗です。おつかれさまでした。',
+    spName:'それあな返し', spWarn:'ミラーは うすら わらっている…' },
+];
+// ---- エピソード（物語レイヤー）------------------------------------------------
+// 4連戦を「論破クエスト」全4話の道行きとして語る。バナーはゲームを止めない。
+const EPISODES = [
+  { title:'第一話「学級会の暴君」',     lore:'放課後の教室。声のデカさだけで正義が決まる国があった。' },
+  { title:'第二話「意識の高い公園」',   lore:'横文字で武装した男。ただし、中身は入っていない。' },
+  { title:'第三話「札束のロジック」',   lore:'金は、正しさを買えるのか。道ばたで確かめる。' },
+  { title:'最終話「鏡のひろゆっけ」',     lore:'最後の相手は、いちばん論破しづらい人物——自分。' },
+];
+function episodeOf(i){ return EPISODES[clamp(i,0,EPISODES.length-1)]; }
+const EPILOGUE = '街から屁理屈が消えた。……まあ、あしたにはまた湧くんですけど。';
+// 無敗（仕切りなおし0回）で全4話を制覇したときだけ出る、もう1行の結び
+const TRUE_EPILOGUE = '——後日。鏡の中のひろゆっけだけが、まだ何か言いたそうにしていた。';
+
+// ---- 幕間（話と話のあいだの独白。次の相手への前振り）--------------------------
+// 第2話〜最終話へ進むときだけ、エピソードバナーの3行目に出る。
+const INTERLUDE = [
+  '',
+  'カタカナが多い人ほど、中身うすいんですよね。',
+  'お金で買えるのは、正しさじゃなく沈黙なんで。',
+  '最後の相手、たぶん いちばん めんどくさいですよ。',
+];
+
+// ---- 中盤の山場＝観客の乱入 ----------------------------------------------------
+// 相手のメンタルが半分を割った最初の一度だけ、話ごとに1本だけ発生する。
+// 数値としてあるだけだった G.audience に、ここで初めて物語の意味を持たせる。
+const EVENTS = [
+  { head:'—— 観客が ざわめいた ——', line:'取り巻き「タケシくん、まけんな！」',
+    sub:'声援に おされて タケシが いきりたった！', col:'#ff9a5a',
+    fn:()=>{ G.audience=clamp(G.audience-18,0,100); G.eGauge=clamp(G.eGauge+25,0,100); } },
+  { head:'—— 観客が ざわめいた ——', line:'通行人「それ、受け売りなんじゃ…？」',
+    sub:'レンの メンタルに ヒビが はいった！', col:'#7ec8ff',
+    fn:()=>{ G.oppHP=Math.max(1,G.oppHP-25); G.audience=clamp(G.audience+15,0,100); } },
+  { head:'—— 観客が ざわめいた ——', line:'部下「社長、これで黙らせましょう」',
+    sub:'ゴウは 札束で メンタルを 買いもどした！', col:'#ffd24a',
+    fn:()=>{ G.oppHP=Math.min(enemy().hp,G.oppHP+22); G.audience=clamp(G.audience-10,0,100); } },
+  { head:'—— 観客が しずまりかえった ——', line:'見物人たちが 息を のんでいる…',
+    sub:'この間、ぜんぶ こっちのもんです —— 必殺ゲージが みちた！', col:'#c8b0ff',
+    fn:()=>{ G.audience=clamp(G.audience+25,0,100); G.gauge=CONFIG.gaugeMax; } },
+];
+
+// ミラーだけ主張テキストがタイプと無関係で、文面から読む手がかりがゼロだった。
+// タイプごとに言いまわしを割りふり、鏡の相手も「読める」ようにする。
+const MIRROR_ARGS = {
+  emotion:   ['それってあなたの感想ですよね？','なんかムカつくんですよね、その言いかた。'],
+  nodata:    ['なんかそういうデータあるんですか？…あ、おいらのセリフか。','これ、もう確定でよくないですか？'],
+  dodge:     ['あなたの負けでよくないですか？','そもそも、その話いま関係あります？'],
+  authority: ['ソースはおいらです。文句あります？','おいらが言ってたって、テレビでやってましたよ。'],
+};
+
+// ---- 論客の口ぐせ（相手ごとの主張タイプの偏り）--------------------------------
+// v16まで主張タイプは毎ターン `rngPick(TAGKEYS)` の完全ランダムで、
+// 4人とも まったく同じ喋りかたをしていた＝2話目からの「？？？」は
+// 推理ではなく ただの1/4のくじ引きでしかなかった。
+// 論客ごとに主張の重みを与え、それを一言で言いあてる「口ぐせ」を添える。
+const HABIT = [
+  { w:{ emotion:5, dodge:3, nodata:1, authority:1 }, hint:'とにかく感情でおしてくる。ときどき話をそらす。' },
+  { w:{ authority:4, nodata:4, dodge:1, emotion:1 }, hint:'肩書きと断言ばかり。感情はほとんど出さない。' },
+  { w:{ dodge:4, authority:3, emotion:2, nodata:1 }, hint:'話をそらしながら、えらい人の名前を出す。' },
+  { w:{ emotion:1, nodata:1, dodge:1, authority:1 }, hint:'よみきれない。４タイプを おなじだけ 使ってくる。' },
+];
+function habitOf(){ return HABIT[clamp(G.enemyIdx,0,HABIT.length-1)]; }
+function pickTag(){
+  const w=habitOf().w; let sum=0;
+  for (const k of TAGKEYS) sum+=(w[k]||0);
+  let r=Math.random()*sum;
+  for (const k of TAGKEYS){ r-=(w[k]||0); if (r<0) return k; }
+  return TAGKEYS[TAGKEYS.length-1];
+}
+// 読みメモ＝この論戦でこれまでに出たタイプの回数（消去法と傾向読みの材料）
+function newSeen(){ const s={}; for (const k of TAGKEYS) s[k]=0; return s; }
+const SCENE_LABEL = { classroom:'🏫 小学校の教室', park:'🛝 公園', street:'🛣 道ばた', studio:'📺 討論スタジオ' };
+
+function enemy(){ return ENEMIES[G.enemyIdx]; }
+function tagHidden(){ return G.enemyIdx>0; }        // 2戦目から？？？（1戦目はチュートリアル）
+// 今かけるべきBGMの場面：自分メンタル瀕死=pinch＞大詰め(ミラー/相手瀕死)=boss＞相手ごとの通常曲
+function stageMode(){
+  if (G.myHP <= G.myMax*0.25) return 'pinch';
+  const st = enemy().style;
+  if (st==='mirror' || G.oppHP<=enemy().hp*0.3) return 'boss';
+  return st==='kid'||st==='mind'||st==='rich' ? st : 'kid';
+}
+
+// ---- メッセージウィンドウ（DQ風） --------------------------------------------
+function msg(t){ G.msgs.push(t); if (G.msgs.length>3) G.msgs.shift(); }
+
+function newGame(){
+  G = {
+    enemyIdx:0, oppHP:ENEMIES[0].hp, myHP:CONFIG.myMax, myMax:CONFIG.myMax,
+    lv:1, exp:0, expNext:20, gold:0, dmgMul:1,
+    deck:[], discard:[], hand:[],
+    items:['herb'],                       // やくそう1個持ちスタート
+    turn:0, combo:0, maxCombo:0, streak:0, gauge:0, eGauge:0,
+    audience:50, shield:0, guarding:false, timerHalf:false,
+    arg:null, sel:-1,
+    phase:'intro', timer:CONFIG.introMs, selectT:0,
+    pending:null, reply:null, result:null,
+    hMood:0, eMood:0.7, hPose:'idle', ePose:'smug', speaker:'enemy',
+    shakeH:0, shakeE:0, flash:0, blink:0, blinkT:2000, eBump:0, punch:0,
+    cutin:null, healMsg:0, menu:null, shopSel:-1, rewardChoices:[],
+    introReply:rngPick(INTRO_REPLIES), defeatComment:'', mutter:'',
+    msgs:[], epi:0, voiceN:0, introVoice:0, ilude:'',
+    seen:newSeen(),                       // 読みメモ＝この論戦で出たタイプの回数
+    noted:noteHas(0),                     // 📓くせノート済み＝読みメモに くせの内訳が出る
+    evFired:false, ev:null,
+    retries: slowOn()?CONFIG.slowRetry:CONFIG.retryMax, usedContinue:false, snap:null,
+  };
+  G.deck = baseDeck();
+  shuffle(G.deck);
+  prepArgument();
+  msg(episodeOf(0).title);
+  msg('ガキ大将タケシが あらわれた！');
+  msg((G.noted?'📓 ':'👁 ')+'くせ：'+habitOf().hint);
+  G.epi=3400;
+  markDeep(0);
+  saveSnap();
+}
+
+// ---- 話のあたま スナップショット（コンティニュー用）--------------------------
+// 各話の開始時に「持ち物・デッキ・レベル・所持金」ごと控えておき、
+// 負けたらその話の頭からやり直せるようにする（4連戦が1回の事故で全部消えないように）
+function saveSnap(){
+  G.snap = {
+    enemyIdx:G.enemyIdx, lv:G.lv, exp:G.exp, expNext:G.expNext, gold:G.gold,
+    dmgMul:G.dmgMul, myMax:G.myMax, turn:G.turn, maxCombo:G.maxCombo,
+    items:G.items.slice(),
+    cards:G.deck.concat(G.discard,G.hand).map(c=>Object.assign({},c)),
+  };
+}
+function doContinue(){
+  const s=G.snap; if (!s) return;
+  const left=G.retries-1;
+  G = {
+    enemyIdx:s.enemyIdx, oppHP:ENEMIES[s.enemyIdx].hp, myHP:s.myMax, myMax:s.myMax,
+    lv:s.lv, exp:s.exp, expNext:s.expNext, gold:s.gold, dmgMul:s.dmgMul,
+    deck:s.cards.map(c=>Object.assign({},c)), discard:[], hand:[],
+    items:s.items.slice(),
+    turn:s.turn, combo:0, maxCombo:s.maxCombo, streak:0, gauge:0, eGauge:0,
+    audience:50, shield:0, guarding:false, timerHalf:false,
+    arg:null, sel:-1,
+    phase:'intro', timer:CONFIG.introMs, selectT:0,
+    pending:null, reply:null, result:null,
+    hMood:0, eMood:0.7, hPose:'idle', ePose:'smug', speaker:'enemy',
+    shakeH:0, shakeE:0, flash:0, blink:0, blinkT:2000, eBump:0, punch:0,
+    cutin:null, healMsg:0, menu:null, shopSel:-1, rewardChoices:[],
+    introReply:rngPick(INTRO_REPLIES), defeatComment:'', mutter:'',
+    msgs:[], epi:0, voiceN:0, introVoice:0, ilude:'',
+    seen:newSeen(),
+    evFired:false, ev:null,               // 乱入イベントは話の頭に戻るのでもう一度起きる
+    retries:left, usedContinue:true, snap:null,
+  };
+  shuffle(G.deck);
+  prepArgument();
+  saveSnap();
+  msg('ひといき ついた —— '+episodeOf(G.enemyIdx).title);
+  msg('もういちど '+enemy().name+'と むきあう！（のこり'+left+'かい）');
+  msg('👁 くせ：'+habitOf().hint);
+  G.epi=3400;
+  FX.clear(); state='play'; SFX.appear(); SFX.heal(); SFX.startBGM(stageMode());
+}
+
+function shuffle(a){ for (let i=a.length-1;i>0;i--){ const j=randi(i+1); [a[i],a[j]]=[a[j],a[i]]; } }
+
+function drawCards(){
+  while (G.hand.length<3){
+    if (!G.deck.length){
+      if (!G.discard.length) break;
+      G.deck=G.discard; G.discard=[]; shuffle(G.deck);
+      msg('すてふだを きりなおした！');
+    }
+    G.hand.push(G.deck.pop());
+  }
+}
+
+function prepArgument(){
+  const en=enemy();
+  const tag=pickTag();
+  const text = en.style==='mirror' ? rngPick(MIRROR_ARGS[tag]) : rngPick(ARGS[tag]);
+  G.arg={ tag, text };
+  G.mutter=rngPick(MUTTERS[tag]);
+  for (const c of G.hand) c.sealed=false;
+  drawCards();
+  G.sel=-1; G.reply=null; G.result=null; G.pending=null;
+}
+function toSelect(){
+  G.phase='select'; G.menu=null;
+  const base = CONFIG.selectMs * (slowOn()?CONFIG.slowMul:1);   // 🐢じっくりモードは考える時間がのびる
+  G.selectT = G.timerHalf ? base/2 : base;
+  G.timerHalf=false;
+  G.speaker='enemy'; G.guarding=false;
+  G.hMood=0; G.eMood=0.7; G.hPose='idle'; G.ePose='smug';
+  SFX.say(enemy().style, 3);   // 相手が主張を「しゃべって」から手番が来る
+}
+
+// ---- 行動 --------------------------------------------------------------------
+function beginAction(pending, reply){
+  G.pending=pending; G.reply=reply; G.speaker='hiro';
+  G.phase='tame'; G.timer=CONFIG.tameMs; G.menu=null;
+  G.hPose='windup'; G.hMood=0.2; G.ePose='smug'; G.eMood=0.5;
+  SFX.beat();
+}
+function playCard(idx){
+  if (state!=='play'||G.phase!=='select') return;
+  if (idx<0||idx>=G.hand.length) return;
+  const card=G.hand[idx];
+  if (card.sealed){ msg('そのカードは ふうじられている！'); SFX.buzz(); return; }
+  G.sel=idx;
+  const match = card.wild || (card.strong && card.strong===G.arg.tag);
+  let kind,dmg,self=0,gaugeAdd;
+  if (match){ kind='crit'; dmg=(26+G.combo*5)*card.mul; gaugeAdd=30+(card.gaugeB||0); }
+  else if (!card.strong){ kind='mild'; dmg=15*card.mul; gaugeAdd=12+(card.gaugeB||0); }
+  else { kind='miss'; dmg=7; self=enemy().atk+randi(6); gaugeAdd=6; }
+  beginAction({kind,dmg:Math.round(dmg),self,gaugeAdd,special:false,card}, {opener:rngPick(OPENERS), line:rngPick(card.bubbles)});
+  G.hand.splice(idx,1); G.discard.push(card); G.sel=-1;
+}
+function unleashSpecial(){
+  if (state!=='play'||G.phase!=='select') return;
+  if (G.gauge<CONFIG.gaugeMax){ msg('ロンパゲージが たりない！'); SFX.buzz(); return; }
+  G.gauge=0; G.flash=1; G.punch=1;
+  const sp=rngPick(SPECIAL_LINES);
+  beginAction({kind:'special', dmg:52+G.combo*4, self:0, gaugeAdd:0, special:true, spLine:sp, card:null}, {opener:'', line:sp});
+  SFX.special();
+}
+// ゲージ50消費の小わざ
+function useSkill(which){
+  if (state!=='play'||G.phase!=='select') return;
+  if (G.gauge<50){ msg('ゲージ 50 いじょうで つかえる'); SFX.buzz(); G.menu=null; return; }
+  G.gauge-=50; G.menu=null;
+  if (which==='time'){ G.selectT+=6000; msg('ひろゆっけは じかんを かせいだ！ +6びょう'); SFX.heal(); }
+  else { G.discard.push(...G.hand); G.hand=[]; drawCards(); msg('てふだを ひきなおした！'); SFX.menu(); }
+}
+function chooseGuard(){
+  if (state!=='play'||G.phase!=='select') return;
+  G.guarding=true; G.turn++; G.gauge=clamp(G.gauge+8,0,CONFIG.gaugeMax);
+  G.hPose='guard'; G.hMood=0; G.speaker='hiro';
+  msg('ひろゆっけは みをまもっている！');
+  SFX.guard();
+  G.result={ msg:'（様子を見ている…）', col:'#7ec8ff', dmg:0, self:0 };
+  G.phase='result'; G.timer=600;
+}
+function useItem(idx){
+  if (state!=='play'||G.phase!=='select') return;
+  const key=G.items[idx]; if (!key) return;
+  const it=ITEMS[key];
+  G.items.splice(idx,1); G.menu=null;
+  if (key==='herb'){ G.myHP=clamp(G.myHP+40,0,G.myMax); msg('やくそうを つかった！ メンタルが 40 かいふく！'); SFX.heal(); FX.burst(110,206,'#7dffb0',14); FX.popup(110,150,'+40','#7dffb0',22); }
+  else if (key==='sand'){ G.selectT+=6000; msg('ときのすなを つかった！ じかん +6びょう！'); SFX.heal(); FX.popup(110,150,'+6s','#c8f0ff',20); }
+  else if (key==='redraw'){ G.discard.push(...G.hand); G.hand=[]; drawCards(); msg('スペアカード！ てふだを ひきなおした！'); SFX.menu(); }
+  else if (key==='charm'){ G.shield++; msg('まもりのおふだを かかげた！（ひっさつ1回むこう）'); SFX.heal(); FX.ring(110,196,'#c8b0ff',10); }
+}
+
+// ---- 時間切れ ---------------------------------------------------------------
+function timeoutAttack(){
+  G.turn++;
+  const self=enemy().atk+randi(5);
+  G.myHP=clamp(G.myHP-self,0,G.myMax);
+  G.combo=0; G.streak=0; G.speaker='enemy';
+  G.audience=clamp(G.audience-15,0,100);
+  G.eGauge=clamp(G.eGauge+10,0,100);
+  G.hMood=-0.7; G.hPose='guard'; G.eMood=1; G.ePose='angry';
+  G.shakeH=14; FX.shake(6); FX.burst(110,240,'#ff7a7a',14); FX.popup(110,150,'-'+self,'#ff9c9c',22); SFX.buzz();
+  msg('じかんぎれ！ '+enemy().name+'の ついげき！ ひろゆっけに '+self+'の ダメージ！');
+  G.result={ msg:rngPick(TIMEOUT_TAUNTS), col:'#ff7a7a', dmg:0, self, timeout:true, hiroSub:rngPick(TIMEOUT_HURT) };
+  G.phase='result'; G.timer=CONFIG.resultMs;
+}
+
+// ---- 効果適用 -----------------------------------------------------------------
+function applyPending(){
+  const p=G.pending, en=enemy(); let m,col; G.turn++;
+  const audMul = G.audience>=90 ? 1.3 : 1;
+  const lvMul = 1+0.05*(G.lv-1);
+  let dmg = Math.round(p.dmg*audMul*lvMul);
+  if (p.kind==='crit'||p.kind==='special'){
+    G.combo++; G.maxCombo=Math.max(G.maxCombo,G.combo);
+    if (p.special){ m=rngPick(TAUNT_CRIT); col='#ffd24a'; FX.burst(360,240,'#ffe27a',34,1.7,'star'); FX.ring(370,196,'#ffe27a',14); FX.shake(15); G.flash=0.9; G.punch=1; hitstop(90);
+      msg('ひっさつ「はい、論破。」！ '+en.name+'に '+dmg+'の ダメージ！！'); G.exp+=12; G.gold+=20; }
+    else { m = G.combo>=2 ? (rngPick(TAUNT_CRIT)+'  '+G.combo+'コンボ！') : rngPick(TAUNT_CRIT);
+      col='#ffe27a'; FX.burst(360,240,'#ffe27a',20,1,'star'); FX.ring(370,196,'#ffe27a',10); SFX.zap(G.combo); FX.shake(8); G.flash=0.5; G.punch=Math.max(G.punch,0.55+Math.min(0.3,G.combo*0.08)); hitstop(55);
+      msg('かいしんの ろんぱ！ '+en.name+'に '+dmg+'の ダメージ！'); G.exp+=8; G.gold+=15; }
+    FX.popup(370,150,'-'+dmg,'#ffe27a',26);
+    G.hMood=1; G.hPose = p.special?'ronpa':'point'; G.eMood=-1; G.ePose='shock'; G.shakeE=14; G.eBump=1; G.speaker='hiro';
+    G.audience=clamp(G.audience+(p.special?20:12),0,100);
+    G.streak++;
+    if (G.streak>=3){ G.streak=0; G.myHP=clamp(G.myHP+15,0,G.myMax); G.audience=clamp(G.audience+20,0,100);
+      msg('３れんぞく クリティカル！ ぎだいを せいした！ メンタル +15'); SFX.crowd(); SFX.comboFinish(); FX.popup(110,150,'+15','#7dffb0',20); }
+    G.cutin={ t:540, dur:540, text: p.special?(p.spLine||'はい、論破。'):rngPick(TAUNT_CRIT), special:p.special };
+    SFX.cutin();
+  } else if (p.kind==='mild'){
+    G.combo=0; G.streak=0; m=rngPick(TAUNT_MILD); col='#7ec8ff'; FX.burst(360,240,'#7ec8ff',10); SFX.dull();
+    FX.popup(370,150,'-'+dmg,'#bcdfff',18);
+    G.hMood=0.4; G.hPose='idle'; G.eMood=-0.4; G.ePose='annoyed'; G.shakeE=6; G.speaker='hiro';
+    G.audience=clamp(G.audience+2,0,100); G.exp+=4; G.gold+=8;
+    msg(en.name+'に '+dmg+'の ダメージ');
+  } else {
+    G.combo=0; G.streak=0; m=rngPick(COMEBACK); col='#ff7a7a'; FX.burst(110,240,'#ff7a7a',14); FX.ring(110,196,'#ff7a7a',8); SFX.buzz(); hitstop(35);
+    FX.popup(110,150,'-'+p.self,'#ff9c9c',22);
+    G.hMood=-0.7; G.hPose='guard'; G.eMood=1; G.ePose='angry'; G.shakeH=14; FX.shake(6); G.speaker='enemy';
+    G.audience=clamp(G.audience-10,0,100);
+    G.eGauge=clamp(G.eGauge+14,0,100);
+    msg('しかし かみあっていない！ はんげきで ひろゆっけに '+p.self+'の ダメージ！');
+  }
+  // カード追加効果
+  if (p.card){
+    if (p.card.heal){ G.myHP=clamp(G.myHP+p.card.heal,0,G.myMax); msg('メンタルが '+p.card.heal+' かいふくした！'); }
+    if (p.card.drain && p.kind!=='miss'){ G.eGauge=clamp(G.eGauge-p.card.drain,0,100); msg(en.name+'の ゲージを '+p.card.drain+' けずった！'); }
+  }
+  // タイプ公開（推理の答え合わせ）＋読みメモへ記録
+  if (G.seen && G.arg) G.seen[G.arg.tag]=(G.seen[G.arg.tag]||0)+1;
+  if (tagHidden()) msg('（いまの主張は「'+TAGS[G.arg.tag].name+'」だった）');
+  G.oppHP=clamp(G.oppHP-dmg,0,en.hp);
+  if (p.self) G.myHP=clamp(G.myHP-p.self,0,G.myMax);
+  G.gauge=clamp(G.gauge+p.gaugeAdd,0,CONFIG.gaugeMax);
+  G.eGauge=clamp(G.eGauge+en.gaugeRate,0,100);
+  G.result={ msg:m,col,dmg,self:p.self,special:p.special,
+    hiroSub: p.kind==='miss' ? rngPick(HURT_LINES) : null };
+  G.phase='result'; G.timer=CONFIG.resultMs;
+  checkLevel();
+}
+
+function checkLevel(){
+  while (G.exp>=G.expNext){
+    G.exp-=G.expNext; G.lv++;
+    G.expNext=Math.round(G.expNext*1.5+10);
+    G.myMax+=10; G.myHP=clamp(G.myHP+20,0,G.myMax);
+    msg('ひろゆっけは レベル'+G.lv+'に あがった！ さいだいメンタル +10');
+    SFX.lvup(); FX.burst(110,200,'#7dff9a',26,1.4,'star'); FX.ring(110,196,'#7dff9a',10); FX.popup(110,140,'LEVEL UP!','#7dff9a',22); hitstop(60);
+  }
+}
+
+// ---- 敵の必殺技 ----------------------------------------------------------------
+function beginEnemyAtk(){
+  const en=enemy();
+  G.phase='enemyatk'; G.timer=CONFIG.enemyAtkMs; G.eGauge=0;
+  G.speaker='enemy'; G.ePose='angry'; G.eMood=1;
+  msg(en.name+'の ひっさつ「'+en.spName+'」！');
+  if (G.shield>0){ G.shield--; msg('まもりのおふだが みがわりに なった！'); SFX.guard(); FX.ring(110,196,'#c8b0ff',10); return; }
+  if (G.guarding){
+    msg('ひろゆっけは ガードした！ カウンター！ '+en.name+'に 14の ダメージ！');
+    G.oppHP=clamp(G.oppHP-14,0,en.hp); G.shakeE=12; FX.burst(370,220,'#7ec8ff',12); FX.popup(370,150,'-14','#bcdfff',20); SFX.guard();
+    return;
+  }
+  SFX.eSpecial(); FX.shake(10); G.shakeH=16; G.flash=0.55; hitstop(45); FX.ring(110,196,'#ff5d5d',10);
+  if (en.style==='kid'){
+    const c=G.hand.filter(c=>!c.sealed);
+    if (c.length){ const s=rngPick(c); s.sealed=true; msg('なみだで カード「'+s.text.replace('\n','')+'」が ふうじられた！'); }
+    G.myHP=clamp(G.myHP-8,0,G.myMax); FX.popup(110,150,'-8','#ff9c9c',22);
+  } else if (en.style==='mind'){
+    G.timerHalf=true; G.myHP=clamp(G.myHP-10,0,G.myMax); FX.popup(110,150,'-10','#ff9c9c',22);
+    msg('よこもじの あらしだ！ つぎの ターンの じかんが はんぶんに！');
+  } else if (en.style==='rich'){
+    G.myHP=clamp(G.myHP-26,0,G.myMax); FX.popup(110,150,'-26','#ff9c9c',24);
+    msg('ひろゆっけに 26の おおダメージ！');
+  } else {
+    G.myHP=clamp(G.myHP-20,0,G.myMax); FX.popup(110,150,'-20','#ff9c9c',24);
+    G.gauge=clamp(G.gauge-30,0,CONFIG.gaugeMax);
+    msg('「それってあなたの感想ですよね」 ゲージを 30 すいとられた！');
+  }
+  FX.burst(110,220,'#ff7a7a',16);
+  G.hMood=-0.8; G.hPose='guard';
+}
+
+// ---- 敵撃破 → ショップ → カード獲得 → 次戦 -----------------------------------
+function beginDefeat(){
+  const en=enemy();
+  G.phase='defeat'; G.timer=CONFIG.defeatMs;
+  G.ePose='shock'; G.eMood=-1; G.hPose='point'; G.hMood=1; G.speaker='enemy';
+  G.defeatComment=rngPick(DEFEAT_COMMENTS);
+  G.exp+=en.exp; G.gold+=en.gold;
+  msg(en.name+'を ろんぱした！ EXP '+en.exp+' と '+en.gold+'G を てにいれた！');
+  // 📓くせノート＝論破した相手の「くせの内訳」を永久に書きとめる（次の周から読みメモに棒グラフ）
+  if (!noteHas(G.enemyIdx)){
+    noteAdd(G.enemyIdx);
+    G.noted=true;
+    msg('📓 くせノートに '+en.name+'の くせを 書きとめた！');
+    FX.popup(370,176,'📓 くせノート '+noteCount()+'/4','#7ec8ff',20);
+    if (noteCount()>=4) msg('📓 くせノート コンプリート！ 称号『くせ看破マスター』');
+  }
+  checkLevel();
+  FX.burst(370,220,'#ffe27a',34,1.6,'star'); FX.ring(370,196,'#ffe27a',12); FX.shake(10); G.flash=0.6; G.punch=1; hitstop(70); SFX.defeat(); SFX.coin();
+  FX.popup(370,140,'撃破！','#ffe27a',26);
+}
+function openShop(){
+  G.phase='shop'; G.shopSel=-1;
+  msg('どうぐや『ロンパー堂』に たちよった');
+  SFX.menu();
+}
+function buyItem(i){
+  const key=SHOP_STOCK[i]; if (!key) return;
+  const it=ITEMS[key];
+  if (G.gold<it.price){ msg('おかねが たりない！'); SFX.buzz(); return; }
+  if (G.items.length>=5){ msg('どうぐが いっぱいだ！（5こまで）'); SFX.buzz(); return; }
+  G.gold-=it.price; G.items.push(key);
+  msg(it.name+'を こうにゅうした！'); SFX.buy();
+}
+function openCardPick(){
+  const pool=REWARD_CARDS.slice(); shuffle(pool);
+  G.rewardChoices=pool.slice(0,3).map(c=>Object.assign({},c));
+  G.phase='cardpick';
+  msg('あたらしい ろんぱカードを 1まい えらべ！');
+  if (G.enemyIdx+1 < ENEMIES.length) msg('つぎは —— '+episodeOf(G.enemyIdx+1).title);
+  SFX.lvup();
+}
+function pickReward(i){
+  const c=G.rewardChoices[i]; if (!c) return;
+  G.deck.push(c); shuffle(G.deck);
+  msg('「'+c.text.replace('\n','')+'」を デッキに くわえた！'); SFX.buy();
+  nextEnemy();
+}
+function nextEnemy(){
+  G.enemyIdx++;
+  const en=enemy();
+  G.oppHP=en.hp; G.eGauge=0;
+  G.myHP=clamp(G.myHP+CONFIG.healBetween,0,G.myMax);
+  G.healMsg=1400;
+  G.introReply=rngPick(INTRO_REPLIES);
+  G.phase='intro'; G.timer=CONFIG.introMs; G.introVoice=0;
+  G.hMood=0; G.hPose='idle'; G.eMood=0.7; G.ePose='smug'; G.speaker='enemy';
+  G.evFired=false; G.ev=null;
+  G.seen=newSeen();                         // 読みメモは相手ごとにまっさら
+  G.noted=noteHas(G.enemyIdx);              // 📓この相手はもうノートに書きとめてあるか
+  G.ilude = INTERLUDE[G.enemyIdx] || '';    // 幕間＝次の相手への独白（バナー3行目）
+  prepArgument();
+  msg(episodeOf(G.enemyIdx).title);
+  if (G.ilude) msg('ひろゆっけ「'+G.ilude+'」');
+  msg(en.style==='mirror' ? 'もうひとりの ひろゆっけが あらわれた！！' : en.name+'が あらわれた！');
+  msg((G.noted?'📓 ':'👁 ')+'くせ：'+habitOf().hint);
+  G.epi=3400;
+  markDeep(G.enemyIdx);
+  saveSnap();
+  SFX.appear(); SFX.heal();
+}
+
+// ---- 観客の乱入（話ごとに1回・戦闘を1.6秒だけ止めて盤面を動かす）--------------
+function beginEvent(){
+  G.evFired=true;
+  const ev=EVENTS[G.enemyIdx];
+  if (!ev){ prepArgument(); toSelect(); return; }
+  G.ev=ev; G.phase='event'; G.timer=CONFIG.eventMs;
+  ev.fn();                       // 効果は表示と同時に反映（数値はHUDのバーにすぐ出る）
+  msg(ev.line); msg(ev.sub);
+  G.speaker='enemy';
+  FX.ring(370,196,ev.col,10); FX.shake(5);
+  SFX.beat(); SFX.menu();
+}
+
+const RANKS=['C','B','A','S'];
+function calcRank(){
+  const pts = G.myHP + G.maxCombo*15 - G.turn*3 + Math.floor(G.audience/5);
+  let r = pts>=120?'S' : pts>=85?'A' : pts>=45?'B' : 'C';
+  // 仕切り直した回数ぶんランクを下げる＝Sは「一度も戻らずに討ち切った証」として守る
+  if (G.usedContinue){ const used=CONFIG.retryMax-G.retries;
+    r = RANKS[clamp(RANKS.indexOf(r)-used,0,3)]; }
+  return r;
+}
+
+// ---- Update -------------------------------------------------------------------
+function update(dt){
+  G.blinkT-=dt; if (G.blinkT<=0){ G.blink=140; G.blinkT=2200+randi(2200); } if (G.blink>0) G.blink-=dt;
+  if (G.shakeE>0) G.shakeE=Math.max(0,G.shakeE-dt/16);
+  if (G.shakeH>0) G.shakeH=Math.max(0,G.shakeH-dt/16);
+  if (G.flash>0)  G.flash=Math.max(0,G.flash-dt/500);
+  if (G.eBump>0)  G.eBump=Math.max(0,G.eBump-dt/700);
+  if (G.punch>0)  G.punch=Math.max(0,G.punch-dt/420);
+  if (G.healMsg>0) G.healMsg-=dt;
+  if (G.epi>0) G.epi-=dt;
+  if (G.cutin){ G.cutin.t-=dt; if (G.cutin.t<=0) G.cutin=null; }
+  SFX.setBGMMode(stageMode());
+
+  if (G.phase==='intro'){
+      // 相手が名乗る→ひろゆっけが受ける、を声の掛け合いで（吹き出しの出るタイミングに合わせる）
+      if (G.introVoice===0 && G.timer < CONFIG.introMs*0.86){ SFX.say(enemy().style,4); G.introVoice=1; }
+      else if (G.introVoice===1 && G.timer < CONFIG.introMs*0.5){ SFX.say('hiro',3); G.introVoice=2; }
+      G.timer-=dt; if (G.timer<=0) toSelect(); }
+  else if (G.phase==='select'){
+    const prev=G.selectT; G.selectT-=dt;
+    if (G.selectT<=3000 && Math.ceil(prev/1000)!==Math.ceil(G.selectT/1000)) SFX.tick();
+    if (G.selectT<=0) timeoutAttack();
+  }
+  else if (G.phase==='tame'){ G.timer-=dt; if (G.timer<=0){ G.phase='reply'; G.timer=CONFIG.replyMs; G.hPose=G.pending.special?'ronpa':'point'; G.voiceN=0; SFX.talk(); } }
+  else if (G.phase==='reply'){ G.timer-=dt;
+      // ひろゆっけの返しを一文字ずつ「しゃべる」＝論破の核が無音だったのを解消（吹き出しの表示と同期）
+      const line=G.reply.line||'', prog=1-G.timer/CONFIG.replyMs;
+      const n=Math.max(1,Math.ceil(line.length*clamp(prog*1.6,0,1)));
+      if (n>G.voiceN){ for (let k=G.voiceN;k<n;k++){ const ch=line[k];
+          if (ch && k%2===0 && '。、！？…「」　 '.indexOf(ch)<0) SFX.voice('hiro',k); }
+        G.voiceN=n; }
+      if (G.timer<=0){ G.phase='hold'; G.timer=CONFIG.holdMs; SFX.beat(); } }
+  else if (G.phase==='hold'){ G.timer-=dt; if (G.timer<=0) applyPending(); }
+  else if (G.phase==='result'){ G.timer-=dt; if (G.timer<=0){
+      if (G.oppHP<=0){ if (G.enemyIdx>=ENEMIES.length-1){ win(); } else { beginDefeat(); } return; }
+      if (G.myHP<=0){ lose(); return; }
+      if (G.eGauge>=100){ beginEnemyAtk(); return; }
+      // 中盤の山場：相手のメンタルが半分を割った最初の一度だけ観客が乱入する
+      if (!G.evFired && G.oppHP>0 && G.oppHP <= enemy().hp*0.5){ beginEvent(); return; }
+      prepArgument(); toSelect(); } }
+  else if (G.phase==='event'){ G.timer-=dt; if (G.timer<=0){ prepArgument(); toSelect(); } }
+  else if (G.phase==='enemyatk'){ G.timer-=dt; if (G.timer<=0){
+      if (G.myHP<=0){ lose(); return; }
+      prepArgument(); toSelect(); } }
+  else if (G.phase==='defeat'){ G.timer-=dt; if (G.timer<=0) openShop(); }
+  // shop / cardpick は入力待ち
+}
+
+// ---- Mouse / Touch --------------------------------------------------------
+let mouse={x:-1,y:-1}, touching=false;
+function setCursor(cx,cy){ const r=C.getBoundingClientRect();
+  mouse.x=(cx-r.left)*(W/r.width); mouse.y=(cy-r.top)*(H/r.height); }
+C.addEventListener('mousemove', e=>{ touching=false; setCursor(e.clientX,e.clientY); });
+// タッチ端末はmousemoveが無くカーソルが(-1,-1)のままなので、指の位置をclick前に反映する
+C.addEventListener('touchstart', e=>{ const t=e.changedTouches[0]; if(!t) return;
+  touching=true; setCursor(t.clientX,t.clientY); SFX.ensure(); }, {passive:true});
+C.addEventListener('click', ()=>{
+  SFX.ensure();
+  if (state==='continue'){ doContinue(); return; }
+  // タイトルの 🐢じっくりモード は、スタートさせずに切替だけ行う（指でも押せるよう判定を広げる）
+  if (state==='title' && inRect(mouse,tapPad(slowRect()))){ toggleSlow(); return; }
+  if (state==='title'||state==='over'){ startGame(); return; }
+  if (state!=='play'||!G) return;
+  if (G.phase==='shop'){
+    for (let i=0;i<SHOP_STOCK.length;i++){ const r=shopRowRect(i); if (inRect(mouse,r)){ buyItem(i); return; } }
+    if (inRect(mouse,shopExitRect())){ openCardPick(); return; }
+    return;
+  }
+  if (G.phase==='cardpick'){
+    for (let i=0;i<3;i++){ const x=cardX(i); if (mouse.y>=CARD.y&&mouse.y<=CARD.y+CARD.h&&mouse.x>=x&&mouse.x<=x+CARD.w){ pickReward(i); return; } }
+    return;
+  }
+  if (G.phase!=='select') return;
+  // メニュー（わざ/どうぐ）
+  if (G.menu){
+    const entries = menuEntries();
+    for (let i=0;i<entries.length;i++){ if (inRect(mouse,menuRowRect(i))){ entries[i].fn(); return; } }
+    G.menu=null; return;
+  }
+  // コマンドボタン（指では26pxが狭いのでタッチ時だけ判定を上下6px広げる）
+  for (let i=0;i<CMDS.length;i++){ if (inRect(mouse,tapPad(cmdRect(i)))){ CMDS[i].fn(); return; } }
+  const i=cardAt(mouse.x,mouse.y); if (i>=0) playCard(i);
+});
+function inRect(m,r){ return m.x>=r.x&&m.x<=r.x+r.w&&m.y>=r.y&&m.y<=r.y+r.h; }
+function tapPad(r){ if(!touching) return r; const p=6; return { x:r.x-4, y:r.y-p, w:r.w+8, h:r.h+p*2 }; }
+
+// ---- レイアウト ------------------------------------------------------------
+const ARENA={ x:0, y:66, w:W, h:262 };
+const GROUND = ARENA.y+ARENA.h-40;
+const CARD={ y:500, w:144, h:196, gap:12, mx:12 };
+function cardX(i){ return CARD.mx + i*(CARD.w+CARD.gap); }
+function cardAt(mx,my){ if (my<CARD.y||my>CARD.y+CARD.h) return -1;
+  for (let i=0;i<G.hand.length;i++){ const x=cardX(i); if (mx>=x&&mx<=x+CARD.w) return i; } return -1; }
+const CMDS=[
+  { key:'Q', label:'わざ',   fn:()=>{ if (G.gauge>=CONFIG.gaugeMax){ unleashSpecial(); } else { G.menu = G.menu==='skill'?null:'skill'; SFX.menu(); } } },
+  { key:'W', label:'どうぐ', fn:()=>{ G.menu = G.menu==='item'?null:'item'; SFX.menu(); } },
+  { key:'G', label:'ガード', fn:()=>chooseGuard() },
+];
+function cmdRect(i){ const w=104, gap=8; const x0=W-3*(w+gap)-8; return { x:x0+i*(w+gap), y:466, w, h:26 }; }
+function slowRect(){ return { x:W/2-150, y:658, w:300, h:24 }; }   // 🐢じっくりモードの切替（タイトル）
+function toggleSlow(){ StoreSlow.set(slowOn()?0:1); SFX.menu(); }
+function menuRowRect(i){ return { x:130, y:392+4+i*22, w:W-160, h:21 }; }
+function shopRowRect(i){ return { x:70, y:210+i*62, w:W-140, h:54 }; }
+function shopExitRect(){ return { x:W/2-70, y:210+SHOP_STOCK.length*62+8, w:140, h:36 }; }
+
+function menuEntries(){
+  if (G.menu==='skill') return [
+    { label:'⏳ じかんかせぎ（ゲージ50）', fn:()=>useSkill('time') },
+    { label:'🃏 ひきなおし（ゲージ50）', fn:()=>useSkill('redraw') },
+  ];
+  if (G.menu==='item'){
+    if (!G.items.length) return [{ label:'（どうぐを もっていない）', fn:()=>{ G.menu=null; } }];
+    return G.items.map((k,i)=>({ label:ITEMS[k].icon+' '+ITEMS[k].name+' — '+ITEMS[k].desc, fn:()=>useItem(i) }));
+  }
+  return [];
+}
+
+// ---- 空間表現（奥行きレイヤー）------------------------------------------------
+// 「遠景＝背景画 ／ 中景＝ふたり ／ 近景＝手前のシルエット」の3層を別々の速さで
+// 動かし（パララックス）、地平の靄・消失点へ収束する床線・被写界深度のぼかしで
+// 平面の絵を「奥行きのある部屋の中」に見せる。
+function camX(depth){
+  const sway = Math.sin(clock()/2600)*6 + Math.sin(clock()/930)*1.8;
+  const kick = G ? (G.punch||0)*9 : 0;      // 会心・必殺のときカメラが前に踏み込む
+  return (sway+kick)*depth;
+}
+const DEPTH = {
+  classroom:{ haze:'rgba(233,220,192,0.55)', line:'rgba(90,60,30,0.30)', fore:'#3a2b1c', mote:'#ffffff' },
+  park:     { haze:'rgba(216,240,255,0.55)', line:'rgba(30,70,25,0.26)', fore:'#1d3d1c', mote:'#ffffff' },
+  street:   { haze:'rgba(255,222,170,0.50)', line:'rgba(255,255,255,0.18)', fore:'#2a2118', mote:'#ffe9c0' },
+  studio:   { haze:'rgba(90,70,140,0.40)',   line:'rgba(180,150,255,0.20)', fore:'#07060f', mote:'#ffe9b0' },
+};
+function depthOf(sc){ return DEPTH[sc]||DEPTH.classroom; }
+// 背景の上に重ねる奥行き（床のパース線＋地平の靄）。人物より奥に描かれる。
+function drawDepth(sc,a){
+  const D=depthOf(sc), hz=GROUND+2, fb=a.y+a.h-hz;
+  // 奥ほど暗く沈む（空気遠近法）＝色味は変えず影だけ重ねる
+  const fg=ctx.createLinearGradient(0,hz,0,a.y+a.h);
+  fg.addColorStop(0,'rgba(0,0,0,0.32)'); fg.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=fg; ctx.fillRect(a.x,hz,a.w,fb);
+  // 消失点へ収束する床の線＋手前ほど間隔の広がる横線
+  const vx=W/2+camX(0.5), vy=hz-96;
+  ctx.save(); ctx.beginPath(); ctx.rect(a.x,hz,a.w,fb+2); ctx.clip();
+  ctx.strokeStyle=D.line; ctx.lineWidth=1.2;
+  for (let i=-7;i<=7;i++){ ctx.beginPath(); ctx.moveTo(vx,vy);
+    ctx.lineTo(vx+i*118+camX(1.1), a.y+a.h+6); ctx.stroke(); }
+  for (let k=1;k<=4;k++){ const t=k/5, y=hz+fb*(t*t);
+    ctx.globalAlpha=0.5*(1-t*0.5); ctx.beginPath(); ctx.moveTo(a.x,y); ctx.lineTo(a.x+a.w,y); ctx.stroke(); }
+  ctx.restore();
+  // 地平線の靄（遠くほど霞む）
+  const hg=ctx.createLinearGradient(0,hz-36,0,hz+6);
+  hg.addColorStop(0,'rgba(255,255,255,0)'); hg.addColorStop(1,D.haze);
+  ctx.fillStyle=hg; ctx.fillRect(a.x,hz-36,a.w,42);
+}
+// 人物より手前の層。いちばん速く動くので「自分もその場にいる」感じが出る。
+function drawSceneFore(sc,name){
+  const a=ARENA, D=depthOf(sc), b=a.y+a.h;
+  ctx.save(); ctx.beginPath(); rrect(a.x+8,a.y,a.w-16,a.h,10); ctx.clip();
+  ctx.save(); ctx.translate(camX(1.6),0);
+  ctx.fillStyle=D.fore;
+  if (sc==='classroom'){
+    // 手前の席＝カメラは教室のうしろの席から見ている
+    for (const x of [-40,120,300,450]){
+      rrect(x,b-26,132,9,3); ctx.fill();
+      ctx.fillRect(x+16,b-18,8,26); ctx.fillRect(x+106,b-18,8,26);
+    }
+  } else if (sc==='park'){
+    ctx.beginPath(); ctx.moveTo(a.x-20,b+8);
+    for (let i=0;i<=27;i++){ const x=a.x-20+i*20;
+      ctx.lineTo(x, b-8-(i%3)*9-Math.abs(Math.sin(i*1.7))*17); }
+    ctx.lineTo(a.x+a.w+20,b+8); ctx.closePath(); ctx.fill();
+  } else if (sc==='street'){
+    ctx.fillRect(a.x-10,b-12,a.w+20,20);                      // 手前の縁石
+    rrect(-70,b-56,120,50,10); ctx.fill();                    // 停まっている車の後ろ姿
+    ctx.fillStyle='rgba(255,90,80,0.85)'; ctx.fillRect(-4,b-40,16,9); ctx.fillRect(28,b-40,16,9);
+  } else {
+    // 観覧席の後頭部＝討論番組をうしろから見ている画
+    for (const [x,r] of [[36,32],[168,26],[318,28],[452,34]]){
+      ctx.beginPath(); ctx.arc(x,b+10,r,Math.PI,TAU); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(x,b+18,r*1.55,r*0.95,0,Math.PI,TAU); ctx.fill();
+    }
+  }
+  ctx.restore();
+  // 空気中のちり（近景でゆっくり流れる）
+  const tt=clock()/1000;
+  for (let i=0;i<14;i++){
+    const sp=0.25+(i%5)*0.06, dx=((i*79+tt*22*sp)%520)-20;
+    const dy=a.y+14+((i*53+Math.sin(tt*0.6+i)*12)%(a.h-28));
+    ctx.globalAlpha=0.10+(i%4)*0.05; ctx.fillStyle=D.mote;
+    ctx.beginPath(); ctx.arc(dx+camX(1.2),dy,0.9+(i%3)*0.7,0,TAU); ctx.fill();
+  }
+  ctx.globalAlpha=1;
+  // 被写界深度：四隅を落として中央のふたりを浮かせる
+  const vg=ctx.createRadialGradient(W/2,a.y+a.h*0.46,70,W/2,a.y+a.h*0.5,300);
+  vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,0.38)');
+  ctx.fillStyle=vg; ctx.fillRect(a.x,a.y,a.w,a.h);
+  // 名前は最前面に固定表示（手前のシルエットに隠れず、上下の揺れでもブレない）
+  if (name!==undefined){
+    ctx.textAlign='center'; ctx.font='11px "Segoe UI"';
+    for (const [nx,ny,txt,col] of [[110,314,'ひろゆっけ','#dfe6ff'],[370,314,name,'#ffd0d0']]){
+      if (!txt) continue;
+      const tw=ctx.measureText(txt).width+16;
+      ctx.fillStyle='rgba(6,8,20,0.62)'; rrect(nx-tw/2,ny-13,tw,17,8); ctx.fill();
+      ctx.fillStyle=col; ctx.fillText(txt,nx,ny);
+    }
+  }
+  ctx.restore();
+}
+
+// ---- 背景シーン --------------------------------------------------------------
+function drawScene(sc){
+  const a=ARENA; ctx.save(); ctx.beginPath(); rrect(a.x+8,a.y,a.w-16,a.h,10); ctx.clip();
+  // 遠景はカメラより奥にあるのでゆっくり動く（横に1.08倍しておき、動かしても端が割れないように）
+  ctx.save(); ctx.translate(W/2,0); ctx.scale(1.08,1); ctx.translate(-W/2,0); ctx.translate(-camX(0.3)/1.08,0);
+  if (sc==='classroom') drawClassroom(a);
+  else if (sc==='park') drawPark(a);
+  else if (sc==='street') drawStreet(a);
+  else drawStudio(a);
+  ctx.restore();
+  drawDepth(sc,a);
+  ctx.fillStyle='rgba(0,0,0,0.18)'; ctx.beginPath(); ctx.ellipse(110,GROUND+16,54,10,0,0,TAU); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(370,GROUND+16,54,10,0,0,TAU); ctx.fill();
+  ctx.restore();
+  ctx.strokeStyle='rgba(120,140,220,0.3)'; ctx.lineWidth=2; rrect(a.x+8,a.y,a.w-16,a.h,10); ctx.stroke();
+  ctx.fillStyle='rgba(0,0,0,0.4)'; rrect(a.x+16,a.y+10,150,22,11); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.font='bold 13px "Segoe UI"'; ctx.textAlign='left'; ctx.fillText(SCENE_LABEL[sc], a.x+26, a.y+26);
+}
+function drawClassroom(a){
+  ctx.fillStyle='#e9dcc0'; ctx.fillRect(a.x,a.y,a.w,a.h);
+  ctx.fillStyle='#caa877'; ctx.fillRect(a.x,GROUND+2,a.w,a.y+a.h-GROUND-2);
+  for (let i=0;i<10;i++){ ctx.strokeStyle='rgba(120,80,40,0.25)'; ctx.beginPath(); ctx.moveTo(a.x+i*52,GROUND+2); ctx.lineTo(a.x+i*52,a.y+a.h); ctx.stroke(); }
+  ctx.fillStyle='#5a4632'; rrect(150,a.y+22,200,96,4); ctx.fill();
+  ctx.fillStyle='#2f5d46'; rrect(156,a.y+28,188,84,3); ctx.fill();
+  ctx.font='bold 15px "Segoe UI"'; ctx.fillStyle='rgba(255,255,255,0.8)'; ctx.textAlign='center';
+  ctx.fillText('学級会：ろんぱ', 250, a.y+58);
+  ctx.strokeStyle='rgba(255,255,255,0.5)'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(180,a.y+74); ctx.lineTo(320,a.y+74); ctx.stroke();
+  ctx.fillStyle='rgba(255,255,255,0.55)'; ctx.font='12px "Segoe UI"'; ctx.fillText('・きゅうしょくのこと', 250, a.y+92);
+  ctx.fillStyle='#bfe3ff'; rrect(24,a.y+26,86,80,4); ctx.fill();
+  ctx.fillStyle='#dff1ff'; ctx.beginPath(); ctx.arc(64,a.y+58,14,0,TAU); ctx.fill();
+  ctx.strokeStyle='#f4f7ff'; ctx.lineWidth=4; ctx.strokeRect(24,a.y+26,86,80);
+  ctx.beginPath(); ctx.moveTo(67,a.y+26); ctx.lineTo(67,a.y+106); ctx.moveTo(24,a.y+66); ctx.lineTo(110,a.y+66); ctx.stroke();
+}
+function drawPark(a){
+  const g=ctx.createLinearGradient(0,a.y,0,GROUND); g.addColorStop(0,'#8fd0ff'); g.addColorStop(1,'#d8f0ff');
+  ctx.fillStyle=g; ctx.fillRect(a.x,a.y,a.w,a.h);
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(120,a.y+40,16,0,TAU); ctx.arc(142,a.y+40,20,0,TAU); ctx.arc(164,a.y+42,15,0,TAU); ctx.fill();
+  ctx.fillStyle='#7ec86a'; ctx.fillRect(a.x,GROUND,a.w,a.y+a.h-GROUND);
+  ctx.fillStyle='#6bb85a'; for(let i=0;i<40;i++){ ctx.fillRect(a.x+i*13+(i%2)*6,GROUND+6+(i%3)*8,3,6); }
+  ctx.strokeStyle='#e24b4b'; ctx.lineWidth=8; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(40,a.y+60); ctx.lineTo(40,GROUND); ctx.moveTo(40,a.y+60); ctx.lineTo(96,GROUND); ctx.stroke();
+  ctx.strokeStyle='#8a94a6'; ctx.lineWidth=4;
+  ctx.beginPath(); ctx.moveTo(210,a.y+58); ctx.lineTo(230,a.y+118); ctx.moveTo(300,a.y+58); ctx.lineTo(280,a.y+118); ctx.moveTo(205,a.y+58); ctx.lineTo(305,a.y+58); ctx.stroke();
+  ctx.lineWidth=2; ctx.strokeStyle='#c9d0dc';
+  ctx.beginPath(); ctx.moveTo(240,a.y+58); ctx.lineTo(240,a.y+100); ctx.moveTo(258,a.y+58); ctx.lineTo(258,a.y+100); ctx.stroke();
+  ctx.fillStyle='#5a6274'; ctx.fillRect(236,a.y+100,26,5);
+  ctx.fillStyle='#8a5a3a'; ctx.fillRect(430,a.y+90,14,GROUND-(a.y+90));
+  ctx.fillStyle='#5aa84a'; ctx.beginPath(); ctx.arc(437,a.y+80,30,0,TAU); ctx.arc(415,a.y+96,22,0,TAU); ctx.arc(458,a.y+96,22,0,TAU); ctx.fill();
+}
+function drawStreet(a){
+  const g=ctx.createLinearGradient(0,a.y,0,a.y+120); g.addColorStop(0,'#ffd18a'); g.addColorStop(1,'#ffeccb');
+  ctx.fillStyle=g; ctx.fillRect(a.x,a.y,a.w,a.h);
+  ctx.fillStyle='#ffb15a'; ctx.beginPath(); ctx.arc(390,a.y+50,22,0,TAU); ctx.fill();
+  const homes=[['#c98a8a',20,90],['#8ab0c9',80,70],['#c9b98a',300,84],['#9ac98a',380,74]];
+  for(const[col,x,h] of homes){ ctx.fillStyle=col; ctx.fillRect(x,GROUND-h,66,h);
+    ctx.fillStyle='#7a5b4a'; ctx.beginPath(); ctx.moveTo(x-4,GROUND-h); ctx.lineTo(x+33,GROUND-h-20); ctx.lineTo(x+70,GROUND-h); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='rgba(255,240,180,0.85)'; ctx.fillRect(x+12,GROUND-h+16,16,16); ctx.fillRect(x+40,GROUND-h+16,16,16); }
+  ctx.fillStyle='#5a5f68'; ctx.fillRect(a.x,GROUND,a.w,a.y+a.h-GROUND);
+  ctx.strokeStyle='#f5d84a'; ctx.lineWidth=3; ctx.setLineDash([18,14]); ctx.beginPath(); ctx.moveTo(a.x,GROUND+22); ctx.lineTo(a.w,GROUND+22); ctx.stroke(); ctx.setLineDash([]);
+  ctx.strokeStyle='#c9d0dc'; ctx.lineWidth=4; ctx.beginPath(); ctx.moveTo(a.x,GROUND-4); ctx.lineTo(a.w,GROUND-4); ctx.stroke();
+  for(let x=a.x+20;x<a.w;x+=70){ ctx.beginPath(); ctx.moveTo(x,GROUND-4); ctx.lineTo(x,GROUND+8); ctx.stroke(); }
+  ctx.fillStyle='#8a8f98'; ctx.fillRect(150,a.y+30,8,GROUND-a.y-30);
+}
+function drawStudio(a){
+  // 討論番組スタジオ（裏ボス戦）
+  ctx.fillStyle='#141020'; ctx.fillRect(a.x,a.y,a.w,a.h);
+  ctx.fillStyle='#221a36'; ctx.fillRect(a.x,GROUND,a.w,a.y+a.h-GROUND);
+  // スポットライト
+  for (const lx of [120,360]){
+    const lg=ctx.createLinearGradient(lx,a.y,lx,GROUND);
+    lg.addColorStop(0,'rgba(255,240,200,0.28)'); lg.addColorStop(1,'rgba(255,240,200,0.02)');
+    ctx.fillStyle=lg; ctx.beginPath(); ctx.moveTo(lx-12,a.y+8); ctx.lineTo(lx-70,GROUND); ctx.lineTo(lx+70,GROUND); ctx.lineTo(lx+12,a.y+8); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#3a3a46'; rrect(lx-16,a.y+2,32,12,4); ctx.fill();
+  }
+  // ON AIR
+  ctx.fillStyle='#7a1020'; rrect(200,a.y+30,96,26,6); ctx.fill();
+  const on=(clock()/700|0)%2===0;
+  ctx.fillStyle=on?'#ff4d5e':'#992833'; ctx.font='bold 15px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText('ON AIR',248,a.y+49);
+  // 討論デスク
+  ctx.fillStyle='#2c3450'; rrect(180,GROUND-38,140,38,6); ctx.fill();
+  ctx.fillStyle='#3d4870'; ctx.fillRect(180,GROUND-38,140,7);
+  // カメラ（左隅）
+  ctx.fillStyle='#23232e'; rrect(18,GROUND-52,42,30,5); ctx.fill();
+  ctx.fillStyle='#111118'; ctx.beginPath(); ctx.arc(64,GROUND-37,10,0,TAU); ctx.fill();
+  ctx.fillStyle='#3a3a46'; ctx.fillRect(34,GROUND-24,10,24);
+  ctx.fillStyle='#ff3a4a'; ctx.beginPath(); ctx.arc(24,GROUND-46,3,0,TAU); ctx.fill();
+  // 観覧席シルエット
+  ctx.fillStyle='rgba(0,0,0,0.45)';
+  for(let i=0;i<8;i++){ ctx.beginPath(); ctx.arc(30+i*60,a.y+a.h-6,14,Math.PI,TAU); ctx.fill(); }
+}
+
+// ---- キャラ描画 ----------------------------------------------------------------
+function armCapsule(x1,y1,x2,y2,wid,col){ ctx.strokeStyle=col; ctx.lineWidth=wid; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); }
+function drawHiro(cx,cy,mood,pose,blink,noLabel,palette){
+  const bob=Math.sin(clock()/700)*1.5; cy+=bob;
+  const P = palette||{ skin:'#f2d2b3', hair:'#26242c', cloth:'#5a6270', cloth2:'#4b525f', eye:'#2b2b33' };
+  ctx.fillStyle=P.cloth; rrect(cx-34,cy+26,68,66,14); ctx.fill();
+  ctx.fillStyle=P.cloth2; rrect(cx-22,cy+22,44,16,8); ctx.fill();
+  if (pose==='point'){ armCapsule(cx+24,cy+42,cx+50,cy+8,11,P.cloth);
+    ctx.fillStyle=P.skin; ctx.beginPath(); ctx.arc(cx+52,cy+2,7,0,TAU); ctx.fill();
+    armCapsule(cx+52,cy+2,cx+54,cy-14,4,P.skin); }
+  else if (pose==='ronpa'){ armCapsule(cx+22,cy+40,cx+70,cy+18,12,P.cloth);
+    ctx.fillStyle=P.skin; ctx.beginPath(); ctx.arc(cx+72,cy+18,8,0,TAU); ctx.fill();
+    armCapsule(cx+72,cy+18,cx+92,cy+16,5,P.skin);
+    ctx.save(); ctx.globalAlpha=0.5; ctx.strokeStyle='#ffe27a'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(cx+96,cy+16,10,0,TAU); ctx.stroke(); ctx.restore(); }
+  else if (pose==='windup'){ armCapsule(cx+22,cy+42,cx+40,cy+26,11,P.cloth);
+    ctx.fillStyle=P.skin; ctx.beginPath(); ctx.arc(cx+42,cy+24,7,0,TAU); ctx.fill(); }
+  else if (pose==='guard'){ armCapsule(cx+18,cy+40,cx+30,cy+16,11,P.cloth);
+    ctx.fillStyle=P.skin; ctx.beginPath(); ctx.arc(cx+30,cy+14,7,0,TAU); ctx.fill(); }
+  else { armCapsule(cx+22,cy+44,cx+30,cy+68,10,P.cloth); }
+  ctx.fillStyle=P.skin; ctx.beginPath(); ctx.arc(cx,cy,32,0,TAU); ctx.fill();
+  ctx.fillStyle=P.hair; ctx.beginPath(); ctx.arc(cx,cy-4,32,Math.PI*1.0,Math.PI*2.0); ctx.fill();
+  ctx.fillRect(cx-32,cy-8,64,7);
+  ctx.beginPath(); ctx.moveTo(cx,cy-22); ctx.lineTo(cx-8,cy-2); ctx.lineTo(cx+8,cy-2); ctx.closePath(); ctx.fill();
+  ctx.fillRect(cx-32,cy-6,7,16); ctx.fillRect(cx+25,cy-6,7,16);
+  ctx.strokeStyle='#2b2b30'; ctx.lineWidth=5; ctx.beginPath(); ctx.arc(cx,cy-2,35,Math.PI*1.08,Math.PI*1.92); ctx.stroke();
+  ctx.fillStyle='#3a3a42'; rrect(cx-40,cy-6,10,20,4); ctx.fill(); rrect(cx+30,cy-6,10,20,4); ctx.fill();
+  ctx.strokeStyle='#3a2e24'; ctx.lineWidth=2.5; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(cx-18,cy-2); ctx.lineTo(cx-6,cy-1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx+18,cy-2); ctx.lineTo(cx+6,cy-1); ctx.stroke();
+  ctx.fillStyle=P.eye;
+  if (blink){ ctx.fillRect(cx-18,cy+5,11,2); ctx.fillRect(cx+7,cy+5,11,2); }
+  else { ctx.fillRect(cx-18,cy+4,11,3); ctx.fillRect(cx+7,cy+4,11,3);
+    ctx.fillRect(cx-10,cy+4,2.5,3); ctx.fillRect(cx+14,cy+4,2.5,3); }
+  ctx.strokeStyle='#9a5f46'; ctx.lineWidth=2.5; ctx.beginPath();
+  if (mood>0.3){ ctx.moveTo(cx-9,cy+17); ctx.quadraticCurveTo(cx+2,cy+25,cx+11,cy+16); }
+  else if (mood<-0.3){ ctx.moveTo(cx-8,cy+20); ctx.quadraticCurveTo(cx,cy+15,cx+8,cy+20); }
+  else { ctx.moveTo(cx-8,cy+18); ctx.quadraticCurveTo(cx,cy+15,cx+8,cy+18); }
+  ctx.stroke();
+  if (!noLabel){ ctx.fillStyle='#dfe6ff'; ctx.font='11px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText('ひろゆっけ', cx, cy+108); }
+}
+
+function drawEnemy(cx,cy,mood,pose,blink,bump,style,name){
+  if (style==='mirror'){
+    // 闇ひろゆっけ：色反転＋赤目
+    const pal={ skin:'#d9c2b4', hair:'#0e0e14', cloth:'#2a2434', cloth2:'#201a2a', eye:'#e03a4a' };
+    ctx.save(); ctx.translate(2*cx,0); ctx.scale(-1,1);       // 左右反転で向かい合わせ
+    drawHiro(cx,cy,mood,pose==='smug'?'idle':pose,blink,true,pal);
+    ctx.restore();
+    // 赤いオーラ
+    ctx.save(); ctx.globalAlpha=0.25+0.1*Math.sin(clock()/300);
+    ctx.strokeStyle='#ff3a4a'; ctx.lineWidth=3;
+    ctx.beginPath(); ctx.arc(cx,cy+20,58,0,TAU); ctx.stroke(); ctx.restore();
+    if (bump>0.05){ ctx.save(); ctx.globalAlpha=bump; ctx.fillStyle='#ff5d5d'; ctx.font='bold 22px "Segoe UI"';
+      ctx.textAlign='center'; ctx.fillText('！？', cx+34, cy-30); ctx.restore(); }
+    ctx.fillStyle='#ffd0d0'; ctx.font='11px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText(name, cx, cy+112);
+    return;
+  }
+  const bob=Math.sin(clock()/650+1)*1.5; cy+=bob;
+  const lean = pose==='angry'?-8 : 0; cx+=lean;
+  const shock = pose==='shock';
+  let skin='#f8d3a8', hair='#3a2a1e', jacket='#8e3fb0', sub='#a94fd0';
+  if (style==='kid'){ skin='#f8d8b0'; hair='#2a1c12'; jacket='#e8c53a'; sub='#f5da6a'; }
+  if (style==='mind'){ skin='#f3d0aa'; hair='#4a3520'; jacket='#3a8a6a'; sub='#4aa383'; }
+  ctx.fillStyle=jacket; rrect(cx-38,cy+24,76,70,14); ctx.fill();
+  if (style==='rich'){
+    ctx.fillStyle=sub; ctx.beginPath(); ctx.moveTo(cx-30,cy+26); ctx.lineTo(cx-6,cy+30); ctx.lineTo(cx-30,cy+58); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(cx+30,cy+26); ctx.lineTo(cx+6,cy+30); ctx.lineTo(cx+30,cy+58); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#ffd24a'; ctx.fillRect(cx-4,cy+30,8,40);
+  } else if (style==='kid'){
+    ctx.fillStyle='#fff'; ctx.font='bold 13px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText('大将', cx, cy+58);
+    ctx.strokeStyle=sub; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(cx-38,cy+70); ctx.lineTo(cx+38,cy+70); ctx.stroke();
+  } else {
+    ctx.fillStyle=sub; rrect(cx-14,cy+24,28,12,6); ctx.fill();
+    ctx.fillStyle='#e8e8ec'; rrect(cx+14,cy+48,20,26,3); ctx.fill();
+    ctx.fillStyle='#7ec8ff'; rrect(cx+16,cy+50,16,18,2); ctx.fill();
+  }
+  if (pose==='angry'){ armCapsule(cx-24,cy+40,cx-64,cy+20,12,jacket);
+    ctx.fillStyle=skin; ctx.beginPath(); ctx.arc(cx-66,cy+20,8,0,TAU); ctx.fill(); armCapsule(cx-66,cy+20,cx-86,cy+18,5,skin); }
+  else if (pose==='smug'){ armCapsule(cx-22,cy+40,cx-10,cy+14,11,jacket);
+    ctx.fillStyle=skin; ctx.beginPath(); ctx.arc(cx-8,cy+14,7,0,TAU); ctx.fill(); }
+  else { armCapsule(cx-24,cy+44,cx-30,cy+68,10,jacket); }
+  ctx.fillStyle=skin; ctx.beginPath(); ctx.arc(cx,cy,33,0,TAU); ctx.fill();
+  ctx.fillStyle='rgba(255,120,120,0.35)'; ctx.beginPath(); ctx.arc(cx-18,cy+8,7,0,TAU); ctx.arc(cx+18,cy+8,7,0,TAU); ctx.fill();
+  if (style==='kid'){
+    ctx.fillStyle=hair; ctx.beginPath(); ctx.arc(cx,cy-8,33,Math.PI,TAU); ctx.fill();
+    ctx.fillStyle='#d04a3a'; ctx.beginPath(); ctx.arc(cx,cy-14,30,Math.PI,TAU); ctx.fill();
+    ctx.fillRect(cx-30,cy-16,60,6);
+    ctx.fillStyle='#b03a2c'; rrect(cx+20,cy-18,26,9,4); ctx.fill();
+    ctx.fillStyle='rgba(160,100,60,0.6)';
+    for(const[fx,fy] of [[-14,12],[-9,15],[14,12],[9,15],[0,13]]){ ctx.beginPath(); ctx.arc(cx+fx,cy+fy,1.4,0,TAU); ctx.fill(); }
+  } else if (style==='mind'){
+    ctx.fillStyle=hair; ctx.beginPath(); ctx.arc(cx,cy-6,33,Math.PI*1.05,Math.PI*1.95); ctx.fill();
+    ctx.fillRect(cx-33,cy-12,66,8);
+    ctx.beginPath(); ctx.arc(cx,cy-36,10,0,TAU); ctx.fill();
+    ctx.strokeStyle='#3a3a42'; ctx.lineWidth=2.5;
+    ctx.beginPath(); ctx.arc(cx-11,cy+3,9,0,TAU); ctx.stroke(); ctx.beginPath(); ctx.arc(cx+11,cy+3,9,0,TAU); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx-2,cy+3); ctx.lineTo(cx+2,cy+3); ctx.stroke();
+  } else {
+    ctx.fillStyle=hair; ctx.beginPath(); ctx.arc(cx,cy-6,33,Math.PI*1.05,Math.PI*1.95); ctx.fill();
+    ctx.fillRect(cx-33,cy-12,66,8);
+    ctx.strokeStyle=hair; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(cx+4,cy-34); ctx.quadraticCurveTo(cx+18,cy-46,cx+6,cy-48); ctx.stroke();
+    if (!shock){ ctx.fillStyle='#8a5a3a'; rrect(cx+8,cy+22,18,5,2); ctx.fill();
+      ctx.fillStyle='#ff8a4a'; ctx.beginPath(); ctx.arc(cx+27,cy+24.5,3,0,TAU); ctx.fill(); }
+  }
+  ctx.strokeStyle='#2e2016'; ctx.lineWidth=3; ctx.lineCap='round';
+  if (shock){ ctx.beginPath(); ctx.moveTo(cx-20,cy-6); ctx.lineTo(cx-8,cy-9); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx+20,cy-6); ctx.lineTo(cx+8,cy-9); ctx.stroke(); }
+  else if (pose==='angry'){ ctx.beginPath(); ctx.moveTo(cx-20,cy-9); ctx.lineTo(cx-6,cy-3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx+20,cy-9); ctx.lineTo(cx+6,cy-3); ctx.stroke(); }
+  else { ctx.beginPath(); ctx.moveTo(cx-20,cy-3); ctx.lineTo(cx-6,cy-6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx+6,cy-8); ctx.lineTo(cx+20,cy-10); ctx.stroke(); }
+  if (shock){ ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(cx-11,cy+3,7,0,TAU); ctx.arc(cx+11,cy+3,7,0,TAU); ctx.fill();
+    ctx.fillStyle='#2b2b33'; ctx.beginPath(); ctx.arc(cx-11,cy+4,3,0,TAU); ctx.arc(cx+11,cy+4,3,0,TAU); ctx.fill(); }
+  else if (blink){ ctx.fillStyle='#2b2b33'; ctx.fillRect(cx-17,cy+3,12,2); ctx.fillRect(cx+5,cy+3,12,2); }
+  else { ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(cx-11,cy+3,6,0,TAU); ctx.arc(cx+11,cy+3,6,0,TAU); ctx.fill();
+    ctx.fillStyle='#2b2b33'; ctx.beginPath(); ctx.arc(cx-11,cy+5,3.2,0,TAU); ctx.arc(cx+11,cy+5,3.2,0,TAU); ctx.fill();
+    ctx.fillStyle=skin; ctx.fillRect(cx-19,cy-2,14,4); ctx.fillRect(cx+5,cy-2,14,4); }
+  ctx.strokeStyle='#c98f66'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(cx-3,cy+10); ctx.lineTo(cx+4,cy+10); ctx.stroke();
+  ctx.fillStyle='#c98f66'; ctx.beginPath(); ctx.arc(cx-3,cy+10,1.4,0,TAU); ctx.arc(cx+4,cy+10,1.4,0,TAU); ctx.fill();
+  ctx.lineWidth=3; ctx.strokeStyle='#8a4a3a';
+  if (shock){ ctx.fillStyle='#7a2b2b'; ctx.beginPath(); ctx.ellipse(cx,cy+20,7,9,0,0,TAU); ctx.fill(); }
+  else if (pose==='angry'){ ctx.fillStyle='#7a2b2b'; ctx.beginPath(); ctx.ellipse(cx,cy+20,10,7,0,0,TAU); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.fillRect(cx-8,cy+15,16,3); }
+  else { ctx.beginPath(); ctx.moveTo(cx-11,cy+20); ctx.quadraticCurveTo(cx+2,cy+27,cx+13,cy+15); ctx.stroke();
+    ctx.fillStyle= style==='rich' ? '#ffd24a' : '#fff';
+    ctx.beginPath(); ctx.moveTo(cx-6,cy+19); ctx.lineTo(cx+8,cy+17); ctx.lineTo(cx+6,cy+22); ctx.closePath(); ctx.fill(); }
+  if (bump>0.05){ ctx.save(); ctx.globalAlpha=bump;
+    ctx.fillStyle='#ff5d5d'; ctx.font='bold 22px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText('！？', cx+34, cy-26);
+    ctx.fillStyle='#ffb0b0'; ctx.beginPath(); ctx.arc(cx-24,cy-24,6,0,TAU); ctx.fill(); ctx.restore(); }
+  if (pose==='angry'){ ctx.fillStyle='#ff5d5d'; ctx.font='bold 16px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText('＃', cx+26, cy-24); }
+  if (pose==='smug'){ ctx.save(); ctx.globalAlpha=0.7; ctx.fillStyle='#ffd24a'; ctx.font='14px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText('✨', cx+30, cy-22); ctx.restore(); }
+  ctx.fillStyle='#ffd0d0'; ctx.font='11px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText(name, cx, cy+112);
+}
+
+// 被弾/会心の瞬間に人物の背後で光らせる衝撃グロー
+function hitFlash(cx,cy,amt,col){
+  if (amt<=0) return;
+  ctx.save(); ctx.globalAlpha=Math.min(1,amt/16)*0.55;
+  const rg=ctx.createRadialGradient(cx,cy,4,cx,cy,64);
+  rg.addColorStop(0,col); rg.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=rg; ctx.beginPath(); ctx.arc(cx,cy,64,0,TAU); ctx.fill();
+  ctx.restore();
+}
+
+// ---- 吹き出し ------------------------------------------------------------------
+function drawBubble(side, tag, text, gold){
+  const bw=214, bh=76, y=88;
+  const x = side==='left' ? 14 : W-14-bw;
+  ctx.fillStyle= gold?'#fff3cc':'#ffffff'; rrect(x,y,bw,bh,14); ctx.fill();
+  ctx.lineWidth=2; ctx.strokeStyle= gold?'#ffcf4a':(tag?tag.col:'#cfd7ea'); rrect(x,y,bw,bh,14); ctx.stroke();
+  ctx.fillStyle=gold?'#fff3cc':'#ffffff';
+  if (side==='left'){ ctx.beginPath(); ctx.moveTo(x+40,y+bh); ctx.lineTo(x+30,y+bh+16); ctx.lineTo(x+58,y+bh); ctx.closePath(); ctx.fill(); }
+  else { ctx.beginPath(); ctx.moveTo(x+bw-40,y+bh); ctx.lineTo(x+bw-30,y+bh+16); ctx.lineTo(x+bw-58,y+bh); ctx.closePath(); ctx.fill(); }
+  let ty=y+22;
+  if (tag){ ctx.fillStyle=tag.col; rrect(x+12,y+10,96,20,10); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.font='bold 12px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText('相手：'+tag.name,x+12+48,y+24); ty=y+48; }
+  ctx.fillStyle= gold?'#7a3d00':'#20263a'; ctx.font='bold 15px "Segoe UI"'; ctx.textAlign='left';
+  wrapText(text, x+14, ty, bw-26, 21);
+}
+
+function drawMutter(){
+  if (!G.mutter) return;
+  ctx.save(); ctx.globalAlpha=0.9;
+  ctx.fillStyle='rgba(18,24,48,0.8)'; rrect(14,92,204,44,12); ctx.fill();
+  ctx.setLineDash([5,4]); ctx.strokeStyle='rgba(150,170,255,0.5)'; ctx.lineWidth=1.5; rrect(14,92,204,44,12); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle='rgba(18,24,48,0.8)';
+  ctx.beginPath(); ctx.arc(50,144,5,0,TAU); ctx.fill();
+  ctx.beginPath(); ctx.arc(62,152,3,0,TAU); ctx.fill();
+  ctx.fillStyle='#aab8e8'; ctx.font='12px "Segoe UI"'; ctx.textAlign='left';
+  wrapText(G.mutter, 24, 110, 186, 15);
+  ctx.restore();
+}
+
+// ---- 読みメモ ------------------------------------------------------------------
+// この論戦で相手が出したタイプの回数。？？？表示のあいだ、消去法と傾向読みの材料になる。
+function drawReadMemo(){
+  if (!G.seen) return;
+  const noted = !!G.noted, bh = noted?37:33;
+  ctx.save();
+  ctx.fillStyle='rgba(12,18,40,0.85)'; rrect(8,461,124,bh,7); ctx.fill();
+  ctx.strokeStyle= noted?'rgba(126,200,255,0.55)':'rgba(150,170,255,0.35)'; ctx.lineWidth=1; rrect(8,461,124,bh,7); ctx.stroke();
+  ctx.textAlign='left'; ctx.fillStyle= noted?'#7ec8ff':'#8792bd'; ctx.font='9px "Segoe UI"';
+  ctx.fillText(noted?'📓 くせノート済み':'👁 これまでの読み', 13, 471);
+  let top=0; for (const k of TAGKEYS) top=Math.max(top,G.seen[k]||0);
+  // 📓ノート済みの相手は「くせの内訳」＝実際の抽選ウェイトが棒グラフで見える（周回のごほうび）
+  const wt = habitOf().w; let wmax=0; for (const k of TAGKEYS) wmax=Math.max(wmax,wt[k]||0);
+  TAGKEYS.forEach((k,i)=>{
+    const x=18+i*28, n=G.seen[k]||0, lead=(n>0&&n===top);
+    ctx.fillStyle=TAGS[k].col; ctx.globalAlpha=n>0?1:0.35;
+    ctx.beginPath(); ctx.arc(x,484,3.5,0,TAU); ctx.fill(); ctx.globalAlpha=1;
+    ctx.fillStyle= lead?'#ffe27a':'#c3ccee'; ctx.font=(lead?'bold ':'')+'11px "Segoe UI"';
+    ctx.fillText(String(n), x+6, 488);
+    if (noted){
+      const bw = wmax>0 ? Math.round(22*(wt[k]||0)/wmax) : 0;
+      ctx.fillStyle='rgba(255,255,255,0.14)'; ctx.fillRect(x-4,491,22,3);
+      ctx.fillStyle=TAGS[k].col; ctx.fillRect(x-4,491,bw,3);
+    }
+  });
+  ctx.restore();
+}
+
+// ---- DQ風ウィンドウ ------------------------------------------------------------
+function dqWindow(x,y,w,h){
+  ctx.fillStyle='rgba(0,0,10,0.92)'; rrect(x,y,w,h,8); ctx.fill();
+  ctx.strokeStyle='#fff'; ctx.lineWidth=2.5; rrect(x+2,y+2,w-4,h-4,7); ctx.stroke();
+  ctx.strokeStyle='rgba(255,255,255,0.35)'; ctx.lineWidth=1; rrect(x+6,y+6,w-12,h-12,5); ctx.stroke();
+}
+function drawMsgWindow(){
+  dqWindow(8,386,W-16,74);
+  ctx.font='13px "MS Gothic","Segoe UI",monospace'; ctx.textAlign='left';
+  for (let i=0;i<G.msgs.length;i++){
+    ctx.fillStyle = i===G.msgs.length-1 ? '#fff' : 'rgba(255,255,255,0.55)';
+    let t=G.msgs[i]; if (t.length>34) t=t.slice(0,34)+'…';
+    ctx.fillText(t, 20, 406+i*17);
+  }
+  // ▼ 点滅
+  if ((clock()/400|0)%2===0){ ctx.fillStyle='#fff'; ctx.fillText('▼', W-30, 452); }
+}
+
+// ---- Render --------------------------------------------------------------------
+function render(){
+  const g=ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#141a3a'); g.addColorStop(1,'#0c1024');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='left'; ctx.fillStyle='#ffe27a'; ctx.font='bold 22px "Segoe UI"'; ctx.fillText('ひろゆっけ２',16,30);
+  ctx.fillStyle='#8aa'; ctx.font='12px "Segoe UI"'; ctx.fillText('〜論破クエスト〜',146,29);
+  ctx.textAlign='right'; ctx.fillStyle=SFX.on?'#7CFC00':'#888'; ctx.font='12px "Segoe UI"'; ctx.fillText((SFX.on?'♪ON':'♪OFF')+' (M)',W-14,20); ctx.textAlign='left';
+
+  if (state==='title'){ renderTitle(); return; }
+
+  const en=enemy();
+  // 敵バー＋敵ゲージ
+  bar(16,40,W-32,16,G.oppHP/en.hp,'#ff5d7a', en.name+' のメンタル');
+  const egr=G.eGauge/100;
+  ctx.fillStyle='#0a0f22'; rrect(16,58,W-32,7,3); ctx.fill();
+  ctx.fillStyle= egr>=0.8?'#ff3a4a':'#c06cff'; rrect(17,59,(W-34)*egr,5,2); ctx.fill();
+  ctx.textAlign='right'; ctx.fillStyle='#ffd0d0'; ctx.font='bold 11px "Segoe UI"';
+  ctx.fillText('第'+(G.enemyIdx+1)+'話 / 全'+ENEMIES.length+'話', W-18, 37); ctx.textAlign='left';
+
+  const zoomCX=W/2, zoomCY=ARENA.y+ARENA.h/2, zoomS=1+G.punch*0.05;
+  ctx.save(); ctx.translate(zoomCX,zoomCY); ctx.scale(zoomS,zoomS); ctx.translate(-zoomCX,-zoomCY);
+  drawScene(en.scene);
+  const blink=G.blink>0;
+  hitFlash(110,206,G.shakeH,'rgba(255,120,120,0.9)');
+  ctx.save(); if (G.shakeH>0) ctx.translate((Math.random()-0.5)*G.shakeH,(Math.random()-0.5)*G.shakeH);
+    drawHiro(110,206,G.hMood,G.hPose,blink,true); ctx.restore();
+  hitFlash(370,206,G.shakeE,'rgba(255,226,122,0.9)');
+  ctx.save();
+  if (G.phase==='intro'){ const p=1-G.timer/CONFIG.introMs; ctx.translate((1-Math.min(1,p*1.6))*140,0); }
+  if (G.phase==='defeat'){ ctx.globalAlpha=Math.max(0.15,G.timer/CONFIG.defeatMs); ctx.translate((1-G.timer/CONFIG.defeatMs)*30,(1-G.timer/CONFIG.defeatMs)*10); }
+  if (G.shakeE>0) ctx.translate((Math.random()-0.5)*G.shakeE,(Math.random()-0.5)*G.shakeE);
+  drawEnemy(370,206,G.eMood,G.ePose,blink,G.eBump,en.style,'');
+  ctx.restore();
+  drawSceneFore(en.scene,en.name);   // ふたりより手前の層＝奥行きの仕上げ
+  ctx.restore();
+
+  if (G.phase==='tame' || G.phase==='hold'){
+    ctx.fillStyle='rgba(0,0,0,0.12)'; ctx.fillRect(ARENA.x,ARENA.y,ARENA.w,ARENA.h);
+    ctx.textAlign='center'; ctx.fillStyle='rgba(255,255,255,'+(0.4+0.3*Math.sin(clock()/120))+')';
+    ctx.font='bold 20px "Segoe UI"'; ctx.fillText('…', W/2, 150);
+  }
+  // 敵必殺の予告（ゲージ80%以上でセリフ表示）
+  if (G.phase==='select' && G.eGauge>=80){
+    ctx.save(); ctx.globalAlpha=0.6+0.4*Math.sin(clock()/150);
+    ctx.textAlign='center'; ctx.fillStyle='#ff8a9c'; ctx.font='bold 13px "Segoe UI"';
+    ctx.fillText(en.spWarn, W/2, ARENA.y+ARENA.h-8); ctx.restore();
+  }
+
+  // 吹き出し
+  if (G.phase==='intro'){
+    drawBubble('right', null, en.intro, false);
+    if (G.timer < CONFIG.introMs*0.55) drawBubble('left', null, G.introReply, false);
+  }
+  else if (G.phase==='select'){
+    drawBubble('right', tagHidden()?HIDDEN_TAG:TAGS[G.arg.tag], G.arg.text, false);
+    drawMutter();
+  }
+  else if (G.phase==='reply' || G.phase==='hold'){
+    let line=G.reply.line;
+    if (G.phase==='reply'){ const prog=1-G.timer/CONFIG.replyMs; const n=Math.max(1,Math.ceil(line.length*clamp(prog*1.6,0,1))); line=line.slice(0,n); }
+    const shown=(G.reply.opener?G.reply.opener+'\n':'')+line;
+    drawBubble('left', null, shown, G.pending&&G.pending.special);
+  } else if (G.phase==='result'){
+    if (G.speaker==='enemy'){
+      drawBubble('right', null, G.result.msg, false);
+      if (G.result.hiroSub) drawBubble('left', null, G.result.hiroSub, false);
+    }
+    else drawBubble('left', null, G.result.msg, G.result.special);
+  } else if (G.phase==='defeat'){
+    drawBubble('right', null, en.defeat, false);
+    drawBubble('left', null, G.defeatComment, false);
+  } else if (G.phase==='enemyatk'){
+    drawBubble('right', null, en.spName+'！！', false);
+  }
+
+  // 自分バー・ゲージ・観客
+  ctx.save(); if (G.shakeH>0) ctx.translate((Math.random()-0.5)*G.shakeH,0);
+    bar(16,334,W-32,16,G.myHP/G.myMax,'#4fd08a','ひろゆっけのメンタル'); ctx.restore();
+  drawGauge(16,353,(W-40)/2,11);
+  drawAudience(24+(W-40)/2,353,(W-40)/2,11);
+  if (G.healMsg>0){ ctx.save(); ctx.globalAlpha=Math.min(1,G.healMsg/500); ctx.fillStyle='#7dffb0';
+    ctx.font='bold 13px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText('メンタル +'+CONFIG.healBetween+' 回復！', W/2, 330); ctx.restore(); }
+
+  // ステータス行（DQ風）
+  ctx.textAlign='left'; ctx.fillStyle='#cdd6ff'; ctx.font='bold 12px "MS Gothic","Segoe UI",monospace';
+  ctx.fillText('Lv'+G.lv+'  EXP '+G.exp+'/'+G.expNext+'  '+G.gold+'G  山札'+G.deck.length+'  ターン'+G.turn, 16, 380);
+  if (G.combo>=2){ ctx.textAlign='right'; ctx.fillStyle='#ffe27a'; ctx.fillText('🔥'+G.combo+'コンボ', W-16, 380); ctx.textAlign='left'; }
+
+  // メッセージウィンドウ
+  drawMsgWindow();
+
+  // 読みメモ（タイプが？？？のあいだだけ・コマンド盤の左あき地）
+  if (tagHidden() && G.phase!=='shop' && G.phase!=='cardpick') drawReadMemo();
+
+  // コマンドボタン
+  if (G.phase==='select'){
+    for (let i=0;i<CMDS.length;i++){
+      const r=cmdRect(i); const hover=inRect(mouse,r);
+      const special = i===0 && G.gauge>=CONFIG.gaugeMax;
+      ctx.fillStyle= special ? '#b3701a' : (hover?'#2c3a6e':'#1c2450'); rrect(r.x,r.y,r.w,r.h,6); ctx.fill();
+      ctx.strokeStyle= special ? '#ffd24a' : (hover?'#ffe27a':'rgba(150,170,255,0.4)'); ctx.lineWidth=hover?2:1.2; rrect(r.x,r.y,r.w,r.h,6); ctx.stroke();
+      ctx.textAlign='center'; ctx.fillStyle= special?'#fff2c8':'#dfe6ff'; ctx.font='bold 13px "Segoe UI"';
+      ctx.fillText((i===0&&special?'必殺!! ':'')+CMDS[i].label+' ['+CMDS[i].key+']', r.x+r.w/2, r.y+18);
+    }
+    // 制限時間バー
+    const rr2=clamp(G.selectT/CONFIG.selectMs,0,1);
+    const col = rr2>0.4 ? '#7ec8ff' : (rr2>0.2 ? '#ffb347' : '#ff5d5d');
+    ctx.fillStyle='#0a0f22'; rrect(12,494,W-24,5,2); ctx.fill();
+    ctx.fillStyle=col; rrect(13,495,(W-26)*clamp(rr2,0,1),3,1); ctx.fill();
+    if (rr2<=0.34){ ctx.textAlign='center'; ctx.fillStyle=col; ctx.font='bold 12px "Segoe UI"';
+      ctx.fillText('のこり '+Math.ceil(G.selectT/1000)+' 秒！', W/2, 490); ctx.textAlign='left'; }
+  }
+
+  FX.preDraw();
+  if (G.phase==='cardpick'){
+    ctx.textAlign='center'; ctx.fillStyle='#ffe27a'; ctx.font='bold 16px "Segoe UI"';
+    ctx.fillText('🎴 ほうびのカードを えらべ！', W/2, 492);
+    for (let i=0;i<G.rewardChoices.length;i++) drawCardAt(G.rewardChoices[i], cardX(i), CARD.y, true, false);
+  } else {
+    for (let i=0;i<G.hand.length;i++){
+      const selectable=state==='play'&&G.phase==='select';
+      const hover=selectable&&cardAt(mouse.x,mouse.y)===i&&!G.menu;
+      drawCardAt(G.hand[i], cardX(i), CARD.y-(hover?8:0), selectable&&!G.menu, hover, i);
+    }
+  }
+  FX.postDraw();
+
+  // メニュー（わざ/どうぐ）
+  if (G.phase==='select' && G.menu){
+    const entries=menuEntries();
+    dqWindow(124,388,W-148,10+entries.length*22+8);
+    ctx.font='13px "MS Gothic","Segoe UI",monospace'; ctx.textAlign='left';
+    for (let i=0;i<entries.length;i++){
+      const r=menuRowRect(i); const hover=inRect(mouse,r);
+      if (hover){ ctx.fillStyle='rgba(255,226,122,0.15)'; ctx.fillRect(r.x,r.y,r.w,r.h); }
+      ctx.fillStyle=hover?'#ffe27a':'#fff';
+      ctx.fillText((hover?'▶':'　')+(i+1)+'. '+entries[i].label, r.x+4, r.y+15);
+    }
+  }
+
+  // ショップ
+  if (G.phase==='shop') renderShop();
+
+  drawEventOverlay();
+  drawEpisodeBanner();
+  if (G.cutin) drawCutin();
+  if (G.flash>0){ ctx.fillStyle='rgba(255,225,120,'+(G.flash*0.5)+')'; ctx.fillRect(0,0,W,H); }
+
+  if (state==='pause') overlay('PAUSE','#7ec8ff','Pキーで再開');
+  if (state==='continue'){
+    overlay('言い負かされた…','#ff7a7a','ここまで —— '+episodeOf(G.enemyIdx).title,'');
+    ctx.save(); ctx.textAlign='center';
+    const bw=372, bx=W/2-bw/2, by=H/2+40;
+    ctx.fillStyle='rgba(20,14,10,0.92)'; rrect(bx,by,bw,64,12); ctx.fill();
+    const blink=(clock()/500|0)%2===0;
+    ctx.strokeStyle=blink?'#ffe27a':'#8a7a3a'; ctx.lineWidth=2.5; rrect(bx,by,bw,64,12); ctx.stroke();
+    ctx.fillStyle='#ffe27a'; ctx.font='bold 19px "Segoe UI"';
+    ctx.fillText('🔥 この話の あたまから 仕切りなおす', W/2, by+27);
+    ctx.fillStyle='#e8eeff'; ctx.font='13px "Segoe UI"';
+    ctx.fillText('タップ / クリック / スペース　（のこり '+G.retries+' かい・カードと どうぐは そのまま）', W/2, by+49);
+    ctx.fillStyle='#9fb0e8'; ctx.font='13px "Segoe UI"';
+    ctx.fillText('R キー … ここで論戦を終える（最初の話から出直し）', W/2, by+88);
+    ctx.fillStyle='#8a93b8'; ctx.font='12px "Segoe UI"';
+    ctx.fillText('※仕切りなおすと 最終ランクが 1だんかい さがります', W/2, by+110);
+    ctx.restore();
+  }
+  if (state==='over'){
+    if (G.oppHP<=0 && G.enemyIdx>=ENEMIES.length-1){
+      overlay('完全論破！','#ffe27a','ランク '+calcRank()+'　Lv'+G.lv+'・'+G.turn+'ターン・最大'+G.maxCombo+'コンボ','タップ / クリック / スペースで再戦');
+      ctx.save(); ctx.textAlign='center'; ctx.fillStyle='#9ad6ff'; ctx.font='13px "Segoe UI"';
+      ctx.fillText(EPILOGUE, W/2, H/2+80);
+      ctx.fillStyle= G.usedContinue?'#8a93b8':'#ffe27a'; ctx.font='bold 13px "Segoe UI"';
+      ctx.fillText(G.usedContinue?'（仕切りなおし '+(CONFIG.retryMax-G.retries)+'かい ぶん ランクを さげました）'
+                                 :'👑 称号『無敗の論客』を 手にいれた！', W/2, H/2+106);
+      // 真エンド＝一度も仕切りなおさずに討ち切ったときだけ、もう1行だけ結びが増える
+      if (!G.usedContinue){ ctx.fillStyle='#c8b0ff'; ctx.font='13px "Segoe UI"';
+        ctx.fillText(TRUE_EPILOGUE, W/2, H/2+132); }
+      ctx.restore();
+    } else {
+      overlay('言い負かされた…','#ff7a7a','Lv'+G.lv+'　'+G.turn+'ターン','タップ / クリック / スペースで再挑戦');
+      ctx.save(); ctx.textAlign='center'; ctx.fillStyle='#9ad6ff'; ctx.font='13px "Segoe UI"';
+      ctx.fillText('ここまで —— '+episodeOf(G.enemyIdx).title, W/2, H/2+80);
+      const dp=StoreDeep.get();
+      ctx.fillStyle='#ffe27a'; ctx.font='13px "Segoe UI"';
+      ctx.fillText('自己最深： 第'+Math.max(dp,G.enemyIdx+1)+'話'+(G.enemyIdx+1>=dp?'　★さいこう記録！':''), W/2, H/2+104);
+      ctx.fillStyle='#8a93b8'; ctx.font='12px "Segoe UI"';
+      ctx.fillText(G.retries>0?'（仕切りなおしは のこり'+G.retries+'かい ありました）':'（仕切りなおしを つかいきりました）', W/2, H/2+126);
+      ctx.restore();
+    }
+  }
+}
+
+// エピソードバナー（非停止・上からフェードして消える）
+// 3行目＝幕間の独白。第2話以降だけ出る＝話と話が地続きに感じられるようにする。
+function drawEpisodeBanner(){
+  if (!G || !G.epi || G.epi<=0) return;
+  const ep=episodeOf(G.enemyIdx), t=G.epi;
+  const a = t>2900 ? (3400-t)/500 : (t<650 ? t/650 : 1);
+  const il = G.ilude||'', bh = il ? 82 : 60;
+  ctx.save(); ctx.globalAlpha=clamp(a,0,1);
+  const y=104;
+  ctx.fillStyle='rgba(8,10,26,0.82)'; ctx.fillRect(0,y-28,W,bh);
+  ctx.fillStyle='#ffe27a'; ctx.fillRect(0,y-28,W,2); ctx.fillRect(0,y-30+bh,W,2);
+  ctx.textAlign='center';
+  ctx.fillStyle='#ffe27a'; ctx.font='bold 19px "Segoe UI"'; ctx.fillText(ep.title, W/2, y-2);
+  ctx.fillStyle='#cdd6ff'; ctx.font='12px "Segoe UI"'; ctx.fillText(ep.lore, W/2, y+20);
+  if (il){ ctx.fillStyle='#9ad6ff'; ctx.font='12px "Segoe UI"'; ctx.fillText('ひろゆっけ「'+il+'」', W/2, y+43); }
+  ctx.restore();
+}
+
+// 観客の乱入イベント（相手メンタル50%割れの一度きり・2.6秒）
+function drawEventOverlay(){
+  if (!G || G.phase!=='event' || !G.ev) return;
+  const ev=G.ev, T=CONFIG.eventMs, t=G.timer;
+  const a = t>T-260 ? (T-t)/260 : (t<320 ? t/320 : 1);
+  ctx.save(); ctx.globalAlpha=clamp(a,0,1);
+  ctx.fillStyle='rgba(0,0,0,0.42)'; ctx.fillRect(ARENA.x,ARENA.y,ARENA.w,ARENA.h);
+  const by=ARENA.y+62, bh=112;
+  ctx.fillStyle='rgba(10,12,30,0.94)'; rrect(18,by,W-36,bh,12); ctx.fill();
+  ctx.strokeStyle=ev.col; ctx.lineWidth=2.5; rrect(18,by,W-36,bh,12); ctx.stroke();
+  ctx.textAlign='center';
+  ctx.fillStyle=ev.col;   ctx.font='bold 14px "Segoe UI"'; ctx.fillText(ev.head, W/2, by+26);
+  ctx.fillStyle='#ffffff';ctx.font='bold 15px "Segoe UI"'; ctx.fillText(ev.line, W/2, by+58);
+  ctx.fillStyle='#cdd6ff';ctx.font='12px "Segoe UI"';      ctx.fillText(ev.sub,  W/2, by+87);
+  ctx.restore();
+}
+
+function drawCardAt(card,x,yy,selectable,hover,num){
+  const w=CARD.w, h=CARD.h;
+  ctx.save();
+  if (!selectable && num!==undefined) ctx.globalAlpha=0.55;
+  if (card.sealed) ctx.globalAlpha=0.35;
+  ctx.fillStyle='rgba(0,0,0,0.35)'; rrect(x+3,yy+5,w,h,12); ctx.fill();
+  const g=ctx.createLinearGradient(0,yy,0,yy+h);
+  if (card.wild){ g.addColorStop(0,'#4a3a10'); g.addColorStop(1,'#2a2008'); }
+  else { g.addColorStop(0,'#20264a'); g.addColorStop(1,'#171b34'); }
+  ctx.fillStyle=g; rrect(x,yy,w,h,12); ctx.fill();
+  ctx.lineWidth=hover?3:1.5;
+  ctx.strokeStyle= card.wild ? '#ffd24a' : (hover?'#ffe27a':'rgba(150,170,255,0.35)'); rrect(x,yy,w,h,12); ctx.stroke();
+  if (num!==undefined){
+    ctx.fillStyle=hover?'#ffe27a':'#3b4577'; ctx.beginPath(); ctx.arc(x+20,yy+20,13,0,TAU); ctx.fill();
+    ctx.fillStyle=hover?'#20263a':'#dfe6ff'; ctx.font='bold 15px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText((num+1),x+20,yy+25);
+  }
+  ctx.fillStyle='#f2f5ff'; ctx.font='bold 16px "Segoe UI"'; ctx.textAlign='center';
+  card.text.split('\n').forEach((ln,k)=>ctx.fillText(ln,x+w/2,yy+70+k*23));
+  // 追加効果表示
+  let fx=[];
+  if (card.mul&&card.mul>1) fx.push('ダメ x'+card.mul);
+  if (card.heal) fx.push('回復+'+card.heal);
+  if (card.gaugeB) fx.push('ゲージ+');
+  if (card.drain) fx.push('敵ゲージ-');
+  if (fx.length){ ctx.fillStyle='#9fe8c0'; ctx.font='11px "Segoe UI"'; ctx.fillText(fx.join(' '), x+w/2, yy+h-42); }
+  const ty=yy+h-30;
+  if (card.wild){ ctx.fillStyle='#b3701a'; rrect(x+12,ty,w-24,22,11); ctx.fill();
+    ctx.fillStyle='#fff2c8'; ctx.font='bold 12px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText('✨ 万能（全タイプ）', x+w/2, ty+15); }
+  else if (card.strong){ const t=TAGS[card.strong]; ctx.fillStyle=t.col; rrect(x+12,ty,w-24,22,11); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.font='bold 12px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText('得意: '+t.name,x+w/2,ty+15); }
+  else { ctx.fillStyle='#4a5580'; rrect(x+12,ty,w-24,22,11); ctx.fill();
+    ctx.fillStyle='#cdd6ff'; ctx.font='bold 12px "Segoe UI"'; ctx.textAlign='center'; ctx.fillText('オールラウンド',x+w/2,ty+15); }
+  if (card.sealed){ ctx.globalAlpha=1; ctx.fillStyle='#ff8a9c'; ctx.font='bold 26px "Segoe UI"'; ctx.textAlign='center';
+    ctx.fillText('😭封印', x+w/2, yy+h/2); }
+  ctx.restore();
+}
+
+function renderShop(){
+  ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(0,0,W,H);
+  dqWindow(48,140,W-96,SHOP_STOCK.length*62+140);
+  ctx.textAlign='center'; ctx.fillStyle='#ffe27a'; ctx.font='bold 20px "MS Gothic","Segoe UI",monospace';
+  ctx.fillText('どうぐや ロンパー堂', W/2, 172);
+  ctx.fillStyle='#fff'; ctx.font='13px "MS Gothic","Segoe UI",monospace';
+  ctx.fillText('もちがね： '+G.gold+'G　　どうぐ '+G.items.length+'/5', W/2, 194);
+  for (let i=0;i<SHOP_STOCK.length;i++){
+    const key=SHOP_STOCK[i], it=ITEMS[key], r=shopRowRect(i);
+    const hover=inRect(mouse,r); const afford=G.gold>=it.price;
+    ctx.fillStyle= hover?'rgba(255,226,122,0.14)':'rgba(255,255,255,0.05)'; rrect(r.x,r.y,r.w,r.h,8); ctx.fill();
+    if (hover){ ctx.strokeStyle='#ffe27a'; ctx.lineWidth=1.5; rrect(r.x,r.y,r.w,r.h,8); ctx.stroke(); }
+    ctx.textAlign='left'; ctx.fillStyle= afford?'#fff':'#888'; ctx.font='bold 15px "Segoe UI"';
+    ctx.fillText(it.icon+' '+it.name, r.x+14, r.y+22);
+    ctx.fillStyle='#9fb0e8'; ctx.font='11px "Segoe UI"'; ctx.fillText(it.desc, r.x+14, r.y+40);
+    ctx.textAlign='right'; ctx.fillStyle= afford?'#ffe27a':'#a66'; ctx.font='bold 14px "Segoe UI"';
+    ctx.fillText(it.price+'G', r.x+r.w-14, r.y+30);
+  }
+  const er=shopExitRect(); const hv=inRect(mouse,er);
+  ctx.fillStyle= hv?'#2c3a6e':'#1c2450'; rrect(er.x,er.y,er.w,er.h,8); ctx.fill();
+  ctx.strokeStyle=hv?'#ffe27a':'rgba(150,170,255,0.4)'; ctx.lineWidth=1.5; rrect(er.x,er.y,er.w,er.h,8); ctx.stroke();
+  ctx.textAlign='center'; ctx.fillStyle='#fff'; ctx.font='bold 14px "Segoe UI"'; ctx.fillText('みせを でる →', er.x+er.w/2, er.y+24);
+}
+
+function drawCutin(){
+  const cu=G.cutin, prog=1-cu.t/cu.dur;
+  const slide=(1-Math.min(1,prog*3))*220;
+  const by=126, bh=178;
+  ctx.save();
+  ctx.fillStyle= cu.special?'rgba(255,238,180,0.95)':'rgba(255,255,255,0.93)';
+  ctx.beginPath(); ctx.moveTo(0,by+22); ctx.lineTo(W,by); ctx.lineTo(W,by+bh); ctx.lineTo(0,by+bh+22); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle=cu.special?'#ff9d3c':'#20263a'; ctx.lineWidth=4;
+  ctx.beginPath(); ctx.moveTo(0,by+22); ctx.lineTo(W,by); ctx.moveTo(0,by+bh+22); ctx.lineTo(W,by+bh); ctx.stroke();
+  ctx.save(); ctx.beginPath(); ctx.moveTo(0,by+22); ctx.lineTo(W,by); ctx.lineTo(W,by+bh); ctx.lineTo(0,by+bh+22); ctx.closePath(); ctx.clip();
+  ctx.strokeStyle='rgba(30,30,50,0.65)'; ctx.lineWidth=2;
+  const fx=310, fy=by+bh/2;
+  for(let i=0;i<30;i++){ const a=(i/30)*TAU+0.05;
+    ctx.beginPath(); ctx.moveTo(fx+Math.cos(a)*300, fy+Math.sin(a)*300);
+    ctx.lineTo(fx+Math.cos(a)*(110+(i%5)*14), fy+Math.sin(a)*(70+(i%4)*12)); ctx.stroke(); }
+  ctx.save(); ctx.translate(84-slide*0.4, fy+26); ctx.scale(1.45,1.45); drawHiro(0,-20,1,cu.special?'ronpa':'point',false,true); ctx.restore();
+  ctx.restore();
+  ctx.save(); ctx.translate(298+slide, fy); ctx.rotate(-0.055);
+  ctx.textAlign='center';
+  ctx.fillStyle='rgba(0,0,0,0.25)'; ctx.font='bold '+(cu.special?34:28)+'px "Segoe UI"';
+  ctx.fillText(cu.text, 3, 11);
+  ctx.fillStyle= cu.special?'#c93a00':'#20263a';
+  ctx.fillText(cu.text, 0, 8);
+  ctx.restore();
+  ctx.restore();
+}
+
+function bar(x,y,w,h,ratio,col,label){ ratio=clamp(ratio,0,1);
+  ctx.fillStyle='#0a0f22'; rrect(x,y,w,h,6); ctx.fill();
+  ctx.fillStyle=col; rrect(x+2,y+2,(w-4)*ratio,h-4,5); ctx.fill();
+  ctx.strokeStyle='rgba(255,255,255,0.18)'; ctx.lineWidth=1; rrect(x,y,w,h,6); ctx.stroke();
+  ctx.fillStyle='#fff'; ctx.font='10px "Segoe UI"'; ctx.textAlign='left'; ctx.fillText(label,x+8,y+h-4);
+  ctx.textAlign='right'; ctx.fillText(Math.ceil(ratio*100)+'%',x+w-8,y+h-4); ctx.textAlign='left'; }
+
+function drawGauge(x,y,w,h){ const r=G.gauge/CONFIG.gaugeMax, full=G.gauge>=CONFIG.gaugeMax;
+  ctx.fillStyle='#0a0f22'; rrect(x,y,w,h,5); ctx.fill();
+  const g=ctx.createLinearGradient(x,0,x+w,0); g.addColorStop(0,'#ff9d3c'); g.addColorStop(1,'#ffe27a');
+  ctx.fillStyle=g; rrect(x+1,y+1,(w-2)*r,h-2,4); ctx.fill();
+  if (full){ ctx.save(); ctx.globalAlpha=0.35+0.35*Math.sin(clock()/120); ctx.fillStyle='#fff'; rrect(x+1,y+1,w-2,h-2,4); ctx.fill(); ctx.restore(); }
+  ctx.strokeStyle='rgba(255,255,255,0.2)'; ctx.lineWidth=1; rrect(x,y,w,h,5); ctx.stroke();
+  ctx.fillStyle='#ffe9b0'; ctx.font='bold 9px "Segoe UI"'; ctx.textAlign='left'; ctx.fillText('ロンパ '+G.gauge,x+6,y+h-2); }
+
+function drawAudience(x,y,w,h){ const r=G.audience/100, hot=G.audience>=90;
+  ctx.fillStyle='#0a0f22'; rrect(x,y,w,h,5); ctx.fill();
+  const g=ctx.createLinearGradient(x,0,x+w,0); g.addColorStop(0,'#4dc3ff'); g.addColorStop(1,'#7dff9a');
+  ctx.fillStyle=g; rrect(x+1,y+1,(w-2)*r,h-2,4); ctx.fill();
+  if (hot){ ctx.save(); ctx.globalAlpha=0.3+0.3*Math.sin(clock()/130); ctx.fillStyle='#fff'; rrect(x+1,y+1,w-2,h-2,4); ctx.fill(); ctx.restore(); }
+  ctx.strokeStyle='rgba(255,255,255,0.2)'; ctx.lineWidth=1; rrect(x,y,w,h,5); ctx.stroke();
+  ctx.fillStyle='#c8f0ff'; ctx.font='bold 9px "Segoe UI"'; ctx.textAlign='left';
+  ctx.fillText((hot?'🔥観客MAX(x1.3)':'観客 '+G.audience), x+6, y+h-2); }
+
+function wrapText(text,x,y,maxW,lh){ for (const para of String(text).split('\n')){ let line='';
+  for (const ch of para){ const test=line+ch; if (ctx.measureText(test).width>maxW && line){ ctx.fillText(line,x,y); line=ch; y+=lh; } else line=test; }
+  if (line) ctx.fillText(line,x,y); y+=lh; } }
+
+function renderTitle(){
+  drawScene('classroom');
+  ctx.save(); drawHiro(110,206,0.5,'point',false,true); drawEnemy(370,206,0.7,'smug',false,0,'kid',''); ctx.restore();
+  drawSceneFore('classroom','ガキ大将タケシ');
+  ctx.textAlign='center';
+  ctx.fillStyle='#fff'; ctx.font='bold 38px "Segoe UI"'; ctx.fillText('ひろゆっけ２',W/2,392);
+  ctx.fillStyle='#ffe27a'; ctx.font='bold 16px "Segoe UI"'; ctx.fillText('〜 論破クエスト 〜',W/2,420);
+  // 世界観と目的（最初の3分で「なぜ戦うのか」を伝える）
+  ctx.fillStyle='#e8eeff'; ctx.font='14px "Segoe UI"';
+  ctx.fillText('屁理屈が街を覆う時代。論客たちが今日も声を張り上げる。',W/2,448);
+  ctx.fillText('あなたはひろゆっけ。全4話・4人を論破し、街に理屈を取り戻せ。',W/2,470);
+  const info=['主張のタイプを見抜いてカードで反撃（2戦目からは？？？）',
+    '論客ごとに口ぐせがある —— くせと 👁読み を手がかりに当てろ',
+    '敵を倒して EXP と ゴールド をかせぎ、レベルアップ！','どうぐ屋で買い物 → ほうびカードでデッキ強化',
+    '敵ゲージMAXで必殺技が来る…ガードか おふだで しのげ！',
+    '相手を半分まで追いつめると 観客が乱入する（話ごとに1回）',
+    '負けても その話の あたまから 仕切りなおせる（1周2かいまで）'];
+  ctx.font='13px "Segoe UI"'; ctx.fillStyle='#bcd'; info.forEach((t,i)=>ctx.fillText(t,W/2,492+i*19));
+  const best=Store.get(), rank=StoreRank.get(), deep=StoreDeep.get();
+  let rec=[];
+  if (deep>0) rec.push('自己最深: 第'+deep+'話');
+  if (best>0) rec.push('最短クリア: '+best+'ターン');
+  if (rank)   rec.push('最高ランク: '+rank);
+  if (rec.length){ ctx.fillStyle='#9fb0e8'; ctx.font='13px "Segoe UI"'; ctx.fillText(rec.join('　'),W/2,616); }
+  // 📓くせノート＝論破した論客の数だけ●が灯る永続コレクション
+  const nc=noteCount();
+  ctx.font='bold 13px "Segoe UI"';
+  ctx.fillStyle= nc>=4 ? '#ffe27a' : '#7ec8ff';
+  ctx.fillText(nc>=4 ? '📓 くせノート 4/4 —— 称号『くせ看破マスター』' : '📓 くせノート '+nc+'/4', W/2, 636);
+  for (let i=0;i<4;i++){ ctx.fillStyle= noteHas(i)?'#7ec8ff':'rgba(255,255,255,0.16)';
+    ctx.beginPath(); ctx.arc(W/2-108+i*11, 632, 3.4, 0, TAU); ctx.fill(); }
+  ctx.fillStyle='#7b86ad'; ctx.font='11px "Segoe UI"';
+  ctx.fillText('書きとめた相手とは、次から 👁読み に くせの内訳が出る', W/2, 650);
+  // 🐢じっくりモード（タップ / Zキーで切替・永続）
+  const sr=slowRect(), on=slowOn();
+  ctx.fillStyle= on?'rgba(126,200,255,0.18)':'rgba(255,255,255,0.06)'; rrect(sr.x,sr.y,sr.w,sr.h,11); ctx.fill();
+  ctx.strokeStyle= on?'#7ec8ff':'rgba(255,255,255,0.28)'; ctx.lineWidth=1.4; rrect(sr.x,sr.y,sr.w,sr.h,11); ctx.stroke();
+  ctx.fillStyle= on?'#bfe6ff':'#8b95b8'; ctx.font='bold 12px "Segoe UI"';
+  ctx.fillText(on?'🐢 じっくり ON — 15.3秒・やりなおし4かい（Z）'
+                 :'🐢 じっくり OFF — 9秒・やりなおし2かい（Zで切替）', W/2, sr.y+16);
+  ctx.fillStyle= StoreNoCon.get() ? '#ffe27a' : '#5b6488'; ctx.font='bold 12px "Segoe UI"';
+  ctx.fillText(StoreNoCon.get()?'👑 称号『無敗の論客』＋真エンド —— 仕切りなおさず全4話制覇'
+                              :'称号『無敗の論客』… 仕切りなおさず全4話制覇で授与＋真エンド',W/2,696);
+  const blink=(clock()/500|0)%2===0; ctx.fillStyle=blink?'#ffe27a':'#667'; ctx.font='bold 19px "Segoe UI"';
+  ctx.fillText('タップ / クリック / スペースでスタート', W/2, 716);
+}
+
+// ---- Input -------------------------------------------------------------------
+function onKey(code){
+  if (code==='KeyM'){ SFX.toggle(); return; }
+  if (state==='continue'){
+    if (code==='Space'||code==='Enter') doContinue();
+    else if (code==='KeyR'){ state='over'; }
+    return; }
+  if (state==='title' && code==='KeyZ'){ toggleSlow(); return; }
+  if (state==='title'||state==='over'){ if (code==='Space'||code==='Enter') startGame(); return; }
+  if (state!=='play') { if (code==='KeyR') startGame(); return; }
+  if (G.phase==='shop'){
+    if (code==='Digit1'||code==='Numpad1') buyItem(0);
+    else if (code==='Digit2'||code==='Numpad2') buyItem(1);
+    else if (code==='Digit3'||code==='Numpad3') buyItem(2);
+    else if (code==='Digit4'||code==='Numpad4') buyItem(3);
+    else if (code==='Space'||code==='Enter'||code==='Escape') openCardPick();
+    return;
+  }
+  if (G.phase==='cardpick'){
+    if (code==='Digit1'||code==='Numpad1') pickReward(0);
+    else if (code==='Digit2'||code==='Numpad2') pickReward(1);
+    else if (code==='Digit3'||code==='Numpad3') pickReward(2);
+    return;
+  }
+  if (code==='KeyR'){ startGame(); return; }
+  if (code==='KeyP'){ state=state==='play'?'pause':'play'; return; }
+  if (G.phase!=='select') return;
+  if (G.menu){
+    const entries=menuEntries();
+    if (code==='Escape'){ G.menu=null; return; }
+    if (code==='Digit1'||code==='Numpad1'){ if(entries[0]) entries[0].fn(); return; }
+    if (code==='Digit2'||code==='Numpad2'){ if(entries[1]) entries[1].fn(); return; }
+    if (code==='Digit3'||code==='Numpad3'){ if(entries[2]) entries[2].fn(); return; }
+    if (code==='Digit4'||code==='Numpad4'){ if(entries[3]) entries[3].fn(); return; }
+    if (code==='Digit5'||code==='Numpad5'){ if(entries[4]) entries[4].fn(); return; }
+    return;
+  }
+  if (code==='Space'){ unleashSpecial(); return; }
+  if (code==='KeyQ'){ CMDS[0].fn(); return; }
+  if (code==='KeyW'){ CMDS[1].fn(); return; }
+  if (code==='KeyG'){ chooseGuard(); return; }
+  if (code==='Digit1'||code==='Numpad1') playCard(0);
+  else if (code==='Digit2'||code==='Numpad2') playCard(1);
+  else if (code==='Digit3'||code==='Numpad3') playCard(2);
+}
+
+function win(){ state='over'; SFX.stopBGM(); SFX.win(); FX.shake(10); FX.burst(360,240,'#ffe27a',40,1.6,'star'); FX.burst(120,240,'#ffe27a',24,1.3,'star'); FX.ring(240,300,'#ffe27a',20);
+  const best=Store.get(); if (best===0||G.turn<best) Store.set(G.turn);
+  const r=calcRank(), old=StoreRank.get();
+  if (RANKS.indexOf(r)>RANKS.indexOf(old)) StoreRank.set(r);
+  markDeep(ENEMIES.length-1);
+  if (!G.usedContinue) StoreNoCon.set(1); }
+function lose(){ SFX.stopBGM(); SFX.lose(); FX.shake(12); markDeep(G.enemyIdx);
+  // 4連戦が一度の事故で全部消えないように、その話の頭からやり直せる（1周2回まで）
+  state = G.retries>0 ? 'continue' : 'over'; }
+function startGame(){ FX.clear(); newGame(); state='play'; SFX.startBGM(stageMode()); }
+
+state='title';
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

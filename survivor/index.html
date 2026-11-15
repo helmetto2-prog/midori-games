@@ -1,0 +1,1260 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>ネオ・サバイバー</title>
+<style>
+  /* 井上瑞季 v10：D5モバイル対応。--chrome＝canvas以外（説明文＋BGMボタン行）が使う縦の高さ。
+     キャンバスは常に正方形のまま「画面に収まる最大サイズ」へ。max 640px＝PCの見た目は従来と一切変わらない。 */
+  :root { --chrome: 132px; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html, body { height:100%; }
+  body { background:#080a18; display:flex; flex-direction:column; align-items:center; justify-content:center;
+         min-height:100vh; font-family:'Segoe UI','MS PGothic',sans-serif;
+         overflow:hidden; overscroll-behavior:none;
+         -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color:transparent;
+         padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  canvas { display:block; box-shadow:0 0 46px rgba(120,150,255,0.35); border-radius:8px;
+           width:clamp(220px, min(98vw, calc(100vh - var(--chrome))), 640px);
+           height:clamp(220px, min(98vw, calc(100vh - var(--chrome))), 640px);
+           touch-action:none; -webkit-touch-callout:none; }
+  #hint { color:#8aa; font-size:12px; margin-top:8px; text-align:center; padding:0 6px; }
+  #bgmrow { margin-top:6px; display:flex; gap:10px; align-items:center; }
+  /* 横持ちスマホなど縦が足りない画面では説明行とBGM行を畳んで、盤面に高さを全振りする */
+  @media (max-height:560px) {
+    :root { --chrome: 6px; }
+    #hint, #bgmrow { display:none; }
+  }
+  @media (max-width:700px) {
+    #hint { font-size:11px; }
+    #bgmrow button, #bgmrow span { font-size:11px !important; }
+  }
+</style>
+</head>
+<body>
+<canvas id="c" width="640" height="640"></canvas>
+<div id="hint">WASD / ← ↑ → ↓ 移動 ／ 攻撃は自動 ／ 強化は 1 2 3（E でリロール） ／ P ポーズ ／ R リスタート ／ M 音</div>
+<div id="bgmrow">
+  <button id="bgmBtn" style="background:#1c2450;color:#dfe6ff;border:1px solid #4a5aa0;border-radius:6px;padding:4px 12px;font-size:12px;cursor:pointer;">🎵 音楽ファイル読込（BGM差し替え）</button>
+  <span id="bgmName" style="color:#8aa;font-size:12px;">内蔵チップチューンBGM</span>
+  <input type="file" id="bgmFile" accept="audio/*" style="display:none">
+</div>
+<div id="errbar" style="display:none;position:fixed;left:0;right:0;bottom:0;background:#c62828;color:#fff;font:12px Consolas,monospace;padding:6px 10px;z-index:99;white-space:pre-wrap"></div>
+<script>
+function showErr(m){ try{ var e=document.getElementById('errbar'); e.style.display='block';
+  if (e.textContent.indexOf(m)<0) e.textContent+=m+'\n'; }catch(_){} }
+window.onerror=function(msg,src,line,col){ showErr(msg+' @'+line+':'+col); };
+window.addEventListener('unhandledrejection',function(ev){ showErr('Promise: '+(ev.reason&&ev.reason.message||ev.reason)); });
+</script>
+<script>
+'use strict';
+/* =========================================================================
+   ENGINE
+   ========================================================================= */
+const C = document.getElementById('c'), ctx = C.getContext('2d');
+const W = C.width, H = C.height, TAU = Math.PI*2;
+const clock = () => performance.now();
+const clamp = (v,a,b) => v<a?a:v>b?b:v;
+const lerp  = (a,b,t) => a+(b-a)*t;
+const randi = n => Math.random()*n|0;
+const rngPick = arr => arr[randi(arr.length)];
+
+let state = 'title';                                  // 'title'|'play'|'pause'|'levelup'|'win'|'over'
+let G = null;
+
+/* ===== 井上瑞季 v10：D5モバイル対応 =====
+   全15本で唯一のD5=0点だった。キーボードが無い端末では1歩も動けない＝そもそも遊べなかったので、
+   ①画面のどこを押さえてもそこに現れる「浮遊バーチャルスティック」（アナログ＝倒し具合で速度が変わる）
+   ②画面内のタップボタン（⏸ポーズ / 🎲リロール / ♪音）
+   ③タップ用の案内文（タイトル・結果画面の文言を端末で出し分け）
+   を新設。PC操作（キーボード＋マウスクリック）は一切変更していない。 */
+const IS_TOUCH = (function(){ try{
+  return ('ontouchstart' in window) || (navigator.maxTouchPoints|0)>0 ||
+         (window.matchMedia && window.matchMedia('(pointer:coarse)').matches);
+}catch(e){ return false; } })();
+
+// 画面内タップボタンの当たり判定（canvas座標）。描画とヒット判定で同じ矩形を使う
+function btnPause(){ return { x:W-56, y:H-96, w:44, h:44 }; }
+function btnSound(){ return { x:W-56, y:H-44, w:44, h:32 }; }
+function btnReroll(){ const r=cardRect(1); return { x:r.x+r.w/2-92, y:r.y+r.h+18, w:184, h:44 }; }
+function inRect(r,x,y){ return x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h; }
+
+const Stick = (function(){          // ※名前を Touch にすると DOM 組込みの Touch を隠すので Stick とする
+  const R = 62, DEAD = 7;          // スティックの可動半径 / 遊び（誤差で勝手に動かないように）
+  let id=-1, ox=0, oy=0, cx=0, cy=0, live=false;
+  function toCanvas(ev){ const r=C.getBoundingClientRect();
+    return [ (ev.clientX-r.left)*(W/(r.width||W)), (ev.clientY-r.top)*(H/(r.height||H)) ]; }
+  C.addEventListener('pointerdown', ev => {
+    SFX.ensure();
+    if (ev.pointerType==='mouse') return;                 // マウスは従来どおりclickで処理（PCの挙動を変えない）
+    const [x,y] = toCanvas(ev);
+    if (state==='play' && (inRect(btnPause(),x,y) || inRect(btnSound(),x,y))) return;   // ボタンの上ではスティックを出さない
+    if (state!=='play') return;
+    id=ev.pointerId; ox=cx=x; oy=cy=y; live=true;
+    try{ C.setPointerCapture(ev.pointerId); }catch(e){}
+    ev.preventDefault();
+  }, {passive:false});
+  C.addEventListener('pointermove', ev => {
+    if (!live || ev.pointerId!==id) return;
+    const [x,y] = toCanvas(ev); cx=x; cy=y; ev.preventDefault();
+  }, {passive:false});
+  const end = ev => { if (ev.pointerId===id){ live=false; id=-1; } };
+  C.addEventListener('pointerup', end);
+  C.addEventListener('pointercancel', end);
+  window.addEventListener('blur', ()=>{ live=false; id=-1; });
+  return {
+    get live(){ return live && state==='play'; },
+    // 倒した向きと強さ（0〜1）。DEAD未満は無視＝置いただけの指で漂わない
+    vec(){ if(!this.live) return null; const dx=cx-ox, dy=cy-oy, d=Math.hypot(dx,dy);
+      if (d<DEAD) return null; const m=Math.min(1, d/R); return { x:dx/d, y:dy/d, m }; },
+    draw(){ if(!this.live) return; const v=this.vec();
+      const kx = v ? ox+v.x*Math.min(R,Math.hypot(cx-ox,cy-oy)) : ox;
+      const ky = v ? oy+v.y*Math.min(R,Math.hypot(cx-ox,cy-oy)) : oy;
+      ctx.save();
+      ctx.strokeStyle='rgba(120,200,255,0.45)'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(ox,oy,R,0,TAU); ctx.stroke();
+      ctx.fillStyle='rgba(20,40,80,0.28)'; ctx.beginPath(); ctx.arc(ox,oy,R,0,TAU); ctx.fill();
+      ctx.shadowColor='#39c7ff'; ctx.shadowBlur=14;
+      ctx.fillStyle='rgba(191,234,255,0.85)'; ctx.beginPath(); ctx.arc(kx,ky,22,0,TAU); ctx.fill();
+      ctx.restore(); },
+  };
+})();
+
+// ---- Input ---------------------------------------------------------------
+const Input = (function(){
+  const keys = new Set();
+  const edge = new Set();
+  const BLOCK = ['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'];
+  document.addEventListener('keydown', e => {
+    SFX.ensure();
+    if (BLOCK.includes(e.code)) e.preventDefault();
+    if (!keys.has(e.code)) edge.add(e.code);
+    keys.add(e.code);
+    onKey(e.code);
+  });
+  document.addEventListener('keyup', e => keys.delete(e.code));
+  C.addEventListener('click', ev => {
+    SFX.ensure();
+    if (state==='intro') confirmIntro();
+    else if (state==='title'||state==='over') startGame();
+    else if (state==='win'){ goEndless(); }
+    else if (state==='levelup') pickAtPointer(ev);
+    else if (state==='play') tapPlay(ev);                                  // v10：⏸/♪のタップボタン
+    else if (state==='pause'){ state='play'; SFX.resume(); }               // v10：ポーズ中はどこを触っても再開
+  });
+  return {
+    held: code => keys.has(code),
+    pressed: code => edge.has(code),
+    clearEdges: () => edge.clear(),
+  };
+})();
+
+// v10：プレイ中の画面内ボタン（キーの無い端末でもポーズ・消音ができる）
+function tapPlay(ev){
+  const rect=C.getBoundingClientRect();
+  const mx=(ev.clientX-rect.left)*(W/(rect.width||W)), my=(ev.clientY-rect.top)*(H/(rect.height||H));
+  if (inRect(btnPause(),mx,my)){ state='pause'; SFX.pause(); return; }
+  if (inRect(btnSound(),mx,my)){ SFX.toggle(); Music.syncMute(); if (SFX.on) SFX.blip(); return; }
+}
+
+// ---- SFX + BGM（デュアルBGMエンジンは「グラディウス風」から流用・改変） ---
+const SFX = (function(){
+  let ac=null, master=null, on=true, bgmIv=null, bgmStep=0, bgmMode='play';
+  // 石坂真希 v09：ネオ・コロニーの合図（E–B–E）＝起動/出撃/新武器/勝利/記録更新に必ず顔を出す統一モチーフ
+  const SIG=[64,71,76];
+  let bossHitT=0;                                       // ボス被弾音の連打よけ
+  const midi = n => 440*Math.pow(2,(n-69)/12);
+  function tone(f,d,type,v){ if(!ac) return; const t=ac.currentTime+0.01, o=ac.createOscillator(), g=ac.createGain();
+    o.type=type; o.frequency.value=f; g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(v,t+0.01);
+    g.gain.exponentialRampToValueAtTime(0.0006,t+d); o.connect(g).connect(master); o.start(t); o.stop(t+d+0.03); }
+  function slide(f0,f1,d,type,v){ if(!ac) return; const t=ac.currentTime+0.01, o=ac.createOscillator(), g=ac.createGain();
+    o.type=type; o.frequency.setValueAtTime(f0,t); o.frequency.exponentialRampToValueAtTime(f1,t+d);
+    g.gain.setValueAtTime(v,t); g.gain.exponentialRampToValueAtTime(0.0006,t+d); o.connect(g).connect(master); o.start(t); o.stop(t+d+0.03); }
+  function noise(v,freq,d){ if(!ac) return; const t=ac.currentTime+0.01, b=ac.createBuffer(1,2048,ac.sampleRate), dt=b.getChannelData(0);
+    for(let i=0;i<dt.length;i++) dt[i]=Math.random()*2-1; const s=ac.createBufferSource(); s.buffer=b;
+    const f=ac.createBiquadFilter(); f.type='bandpass'; f.frequency.value=freq; const g=ac.createGain();
+    g.gain.setValueAtTime(v,t); g.gain.exponentialRampToValueAtTime(0.001,t+d); s.connect(f).connect(g).connect(master); s.start(t); s.stop(t+d+0.05); }
+  const BGM = {
+    play: {
+      lead:[69,null,72,74, 76,null,74,72, 71,null,74,76, 79,null,76,74,
+            72,null,76,79, 81,null,79,76, 74,null,71,74, 72,null,69,null],
+      bass:[45,null,45,null, 41,null,41,null, 43,null,43,null, 47,null,47,null,
+            45,null,45,null, 41,null,41,null, 43,null,47,null, 45,null,45,null],
+    },
+    boss: {
+      lead:[69,72,75,76, 75,72,69,68, 69,72,76,79, 78,76,72,69,
+            71,74,77,80, 79,77,74,71, 80,79,77,76, 75,73,72,71],
+      bass:[45,45,45,46, 45,45,45,44, 50,50,50,51, 50,50,50,49,
+            52,52,52,53, 52,52,52,51, 45,45,48,46, 45,44,45,47],
+    },
+    // タイトル/結果画面の「嵐の前後の静けさ」＝ゆったり漂うアンビエント（Em）
+    title: {
+      lead:[64,null,null,null, 67,null,null,null, 71,null,69,null, 67,null,null,null,
+            64,null,null,null, 62,null,null,null, 64,null,67,null, 71,null,null,null],
+      bass:[40,null,null,null, 40,null,null,null, 43,null,null,null, 43,null,null,null,
+            45,null,null,null, 45,null,null,null, 40,null,null,null, 40,null,null,null],
+    },
+    // HP危機（残り体力わずか）＝半音でにじり寄る速い緊迫曲。音で「もう死ぬ」を先導
+    pinch: {
+      lead:[68,69,68,67, 68,71,68,65, 68,69,68,67, 68,64,63,64,
+            68,69,68,67, 68,71,73,71, 68,67,66,65, 64,63,62,61],
+      bass:[44,44,45,45, 44,44,43,43, 44,44,45,45, 44,44,42,42,
+            44,44,45,45, 44,44,43,43, 40,40,41,41, 42,42,43,43],
+    },
+  };
+  function bgmInterval(){ return bgmMode==='boss'?118: bgmMode==='pinch'?104: bgmMode==='title'?200:150; }
+  function tickBGM(){ if(!ac) return; const mode=bgmMode, boss=mode==='boss', pinch=mode==='pinch', title=mode==='title';
+    const m=BGM[mode]||BGM.play, i=bgmStep%32;
+    const L=m.lead[i], B=m.bass[i];
+    if(title){
+      if(B!=null) tone(midi(B-12),0.5,'sine',0.09);
+      if(L!=null){ tone(midi(L),0.5,'triangle',0.05); tone(midi(L+7),0.45,'sine',0.02); }   // 5度を薄く重ねた漂う音
+      if(i%8===0) noise(0.03,300,0.22);
+    } else if(pinch){
+      if(B!=null) tone(midi(B-12),0.11,'sawtooth',0.10);
+      if(L!=null) tone(midi(L),0.10,'square',0.05);
+      if(i%2===0) noise(0.10,180,0.07);        // 速い鼓動のような打点
+      if(i%4===2) noise(0.05,2400,0.03);
+    } else {
+      if(B!=null) tone(midi(B-12), boss?0.16:0.20,'triangle', boss?0.10:0.08);
+      if(L!=null) tone(midi(L),0.15,'square', boss?0.05:0.04);
+      if(boss){ if(i%4===2) noise(0.07,2000,0.04); if(i%2===0) noise(0.03,1100,0.03); if(i%8===0) noise(0.13,150,0.11); }
+      else { if(i%8===0) noise(0.09,220,0.09); else if(i%4===2) noise(0.02,1700,0.03); }
+    }
+    bgmStep=(bgmStep+1)%32;
+  }
+  return {
+    get on(){ return on; },
+    ensure(){ try{ if(!ac){ const A=window.AudioContext||window.webkitAudioContext; if(!A) return;
+      ac=new A(); master=ac.createGain(); master.gain.value=on?0.2:0; master.connect(ac.destination); }
+      if(ac.state==='suspended') ac.resume(); }catch(e){} },
+    toggle(){ on=!on; if(master) master.gain.value=on?0.2:0; },
+    startBGM(mode){ this.ensure(); this.stopBGM(); bgmMode=mode||'play'; bgmStep=0; if(ac) bgmIv=setInterval(tickBGM,bgmInterval()); },
+    setBGMMode(mode){ if(mode===bgmMode||!bgmIv) return; bgmMode=mode; clearInterval(bgmIv); bgmIv=setInterval(tickBGM,bgmInterval()); },
+    stopBGM(){ if(bgmIv){ clearInterval(bgmIv); bgmIv=null; } },
+    shoot(){ tone(760,0.05,'square',0.03); },
+    hit(){ tone(300,0.05,'square',0.04); },
+    kill(n){ const p=Math.min(n||0,18); const base=220*Math.pow(2,p/12);   // コンボで半音ずつ上昇
+      noise(0.13,900,0.09); tone(base,0.08,'square',0.05); if(p>=6) tone(base*1.5,0.06,'triangle',0.03); },
+    hurt(){ tone(150,0.18,'sawtooth',0.12); noise(0.12,400,0.12); },
+    levelup(){ [60,64,67,72].forEach((m,i)=>setTimeout(()=>{ tone(midi(m),0.2,'square',0.1); tone(midi(m-12),0.22,'triangle',0.05); }, i*70));   // 二声化
+      setTimeout(()=>{ tone(midi(76),0.3,'square',0.09); tone(midi(79),0.3,'triangle',0.05); noise(0.05,3000,0.1); }, 4*70); },   // 締めの高音和音＋きらめき
+    bossClear(){ [72,76,79,84].forEach((m,i)=>setTimeout(()=>{ tone(midi(m),0.16,'square',0.11); tone(midi(m-12),0.18,'triangle',0.06); }, i*80));   // ボス撃破の専用ファンファーレ（毎分の節目）
+      setTimeout(()=>{ tone(midi(84),0.5,'square',0.08); tone(midi(88),0.5,'triangle',0.05); noise(0.08,260,0.3); }, 4*80); },
+    gem(){ tone(880,0.05,'triangle',0.035); },
+    nova(){ noise(0.2,600,0.2); slide(600,180,0.25,'sawtooth',0.08); },
+    bolt(){ noise(0.16,2600,0.1); slide(1800,400,0.12,'square',0.07); },
+    bomb(){ noise(0.5,300,0.45); slide(300,60,0.4,'sawtooth',0.14); },
+    magnet(){ slide(400,1400,0.3,'triangle',0.08); },
+    meat(){ tone(520,0.1,'triangle',0.08); tone(660,0.12,'triangle',0.07); },
+    chest(){ [72,76,79,84].forEach((m,i)=>setTimeout(()=>tone(midi(m),0.14,'square',0.09), i*70)); },
+    warn(){ [0,1,2].forEach(i=>setTimeout(()=>{ tone(220,0.18,'sawtooth',0.12); tone(233,0.18,'sawtooth',0.1); }, i*260)); },
+    heart(){ tone(70,0.12,'sine',0.22); },
+    win(){ [60,64,67,72,76,79,84].forEach((m,i)=>setTimeout(()=>{ tone(midi(m),0.25,'square',0.12); tone(midi(m-12),0.28,'triangle',0.06); }, i*110));   // 二声上昇
+      setTimeout(()=>{ [72,76,79,84].forEach(m=>tone(midi(m),0.9,'square',0.07)); noise(0.06,3200,0.3); }, 7*110); },   // フィナーレ和音＋きらめき
+    lose(){ [67,63,60,55,48].forEach((m,i)=>setTimeout(()=>tone(midi(m),0.28,'sawtooth',0.12), i*150));   // 下降フレーズ
+      setTimeout(()=>{ tone(midi(36),1.1,'sawtooth',0.11); tone(midi(43),1.1,'sine',0.08); noise(0.10,180,0.7); }, 5*150); },   // 低音サステイン和音＋重い残響
+    blip(){ tone(660,0.04,'square',0.06); },
+    /* ===== 石坂真希 v09：M4効果音レイヤー拡張＋M5統一モチーフ =====
+       従来は「撃つ・当たる・倒す・被弾・拾う」までしか音が無く、
+       出撃/ポーズ/新武器の獲得/宝箱の落下/ボマーの爆散/危機突入/自己ベスト更新が全て無音だった。 */
+    sysBoot(){ SIG.forEach((m,i)=>setTimeout(()=>{ tone(midi(m),0.24,'square',0.07); tone(midi(m+12),0.18,'triangle',0.03); }, i*95));   // 端末が立ち上がる合図
+      setTimeout(()=>{ slide(300,1800,0.35,'sine',0.05); noise(0.04,2600,0.26); }, 3*95); },
+    launch(){ tone(midi(40),0.28,'sawtooth',0.13); slide(180,760,0.3,'square',0.07);                                   // 出撃＝低音の踏み込み＋上昇
+      setTimeout(()=>{ tone(midi(SIG[0]),0.13,'square',0.08); tone(midi(SIG[1]),0.2,'square',0.07); }, 155); },
+    pause(){ tone(midi(72),0.09,'square',0.06); setTimeout(()=>tone(midi(65),0.15,'square',0.05), 80); },              // 時が止まる（下降）
+    resume(){ tone(midi(65),0.09,'square',0.05); setTimeout(()=>tone(midi(72),0.15,'square',0.06), 80); },             // 再開（上昇）
+    cursor(){ tone(980,0.03,'square',0.045); },                                                                        // リロール＝選び直しの軽い音
+    getWeapon(){ [SIG[0],SIG[1],SIG[2],SIG[2]+7].forEach((m,i)=>setTimeout(()=>{ tone(midi(m),0.18,'square',0.09); tone(midi(m-12),0.2,'triangle',0.05); }, i*62));
+      setTimeout(()=>noise(0.05,3400,0.16), 4*62); },                                                                  // 新武器の獲得＝格上げの4音
+    bomberPop(){ noise(0.16,520,0.17); slide(520,120,0.22,'sawtooth',0.08); tone(180,0.12,'square',0.05); },           // ボマー爆散＝弾がばら撒かれる警告
+    bossHit(){ const n=clock(); if(n-bossHitT<95) return; bossHitT=n;                                                   // ボスへの一撃だけ重い手応え
+      tone(120,0.09,'sawtooth',0.07); noise(0.06,320,0.07); },
+    chestDrop(){ [83,88].forEach((m,i)=>setTimeout(()=>tone(midi(m),0.16,'triangle',0.06), i*95)); noise(0.03,4200,0.2); },  // 宝箱が落ちたきらめき
+    itemDrop(){ tone(1320,0.05,'sine',0.03); setTimeout(()=>tone(1760,0.06,'sine',0.028), 55); },                      // アイテムが落ちた小さな合図
+    comboMile(){ [76,81,88].forEach((m,i)=>setTimeout(()=>tone(midi(m),0.1,'square',0.06), i*55)); noise(0.03,3000,0.12); }, // コンボ15の節目
+    alarm(){ [0,1].forEach(i=>setTimeout(()=>slide(880,440,0.26,'sawtooth',0.09), i*300)); },                          // 危機突入＝一度きりの警報
+    record(){ [SIG[0],SIG[1],SIG[2],83,88].forEach((m,i)=>setTimeout(()=>{ tone(midi(m),0.2,'square',0.1); tone(midi(m-12),0.22,'triangle',0.05); }, i*120));
+      setTimeout(()=>{ tone(midi(88),0.7,'square',0.07); noise(0.05,3600,0.3); }, 5*120); },                           // 自己ベスト更新の叙勲
+    endless(){ slide(220,880,0.4,'sawtooth',0.09);                                                                     // 無限モードへ踏み出す
+      setTimeout(()=>{ tone(midi(SIG[0]),0.2,'square',0.08); tone(midi(SIG[2]),0.24,'square',0.06); }, 200); },
+  };
+})();
+
+// ---- FX ------------------------------------------------------------------
+const FX = (function(){
+  let parts=[], shards=[], rings=[], shake=0, flashCol=null, flashT=0, flashDur=0;
+  return {
+    burst(x,y,col,count,spd){ count=count||8; spd=spd||3.5; for(let i=0;i<count;i++){ const a=Math.random()*TAU, s=1+Math.random()*spd;
+      parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,col:col||'#fff',life:0,dur:0.3+Math.random()*0.35,r:2+Math.random()*2}); } },
+    shard(x,y,col,count){ count=count||6; for(let i=0;i<count;i++){ const a=Math.random()*TAU, s=2+Math.random()*4.5;
+      shards.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,rot:Math.random()*TAU,vr:(Math.random()-0.5)*0.5,
+        size:3+Math.random()*5,col:col||'#fff',life:0,dur:0.4+Math.random()*0.4}); } },
+    // 衝撃波リング：撃破・爆発の瞬間に外へ広がる輪。ヒットの「効いた感」を絵で残す
+    ring(x,y,col,maxR,dur,width){ rings.push({x,y,col:col||'#fff',maxR:maxR||120,life:0,dur:dur||0.42,w:width||4}); },
+    // 全画面インパクトフラッシュ：大事件の一瞬だけ画面全体を染める
+    flash(col,dur){ flashCol=col||'#fff'; flashT=flashDur=dur||0.24; },
+    shake(amt){ shake=Math.max(shake,amt); },
+    update(dt){ const f=dt/16;
+      for(const p of parts){ p.life+=dt/1000; p.x+=p.vx*f; p.y+=p.vy*f; p.vx*=0.94; p.vy*=0.94; }
+      parts=parts.filter(p=>p.life<p.dur);
+      for(const s of shards){ s.life+=dt/1000; s.x+=s.vx*f; s.y+=s.vy*f; s.rot+=s.vr*f; s.vx*=0.95; s.vy*=0.95; }
+      shards=shards.filter(s=>s.life<s.dur);
+      for(const r of rings){ r.life+=dt/1000; }
+      rings=rings.filter(r=>r.life<r.dur);
+      if(flashT>0) flashT=Math.max(0,flashT-dt/1000);
+      shake=Math.max(0,shake-dt/16); },
+    preDraw(){ if(shake>0){ ctx.save(); ctx.translate((Math.random()-0.5)*shake,(Math.random()-0.5)*shake); } },
+    postDraw(){ if(shake>0) ctx.restore();
+      for(const r of rings){ const t=r.life/r.dur; const rr=r.maxR*(1-Math.pow(1-t,2));   // 素早く広がって減速
+        ctx.save(); ctx.globalAlpha=Math.max(0,1-t)*0.85; ctx.strokeStyle=r.col; ctx.lineWidth=Math.max(0.5,r.w*(1-t*0.7));
+        ctx.beginPath(); ctx.arc(r.x,r.y,rr,0,TAU); ctx.stroke(); ctx.restore(); }
+      for(const p of parts){ ctx.save(); ctx.globalAlpha=Math.max(0,1-p.life/p.dur);
+        ctx.fillStyle=p.col; ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,TAU); ctx.fill(); ctx.restore(); }
+      for(const s of shards){ ctx.save(); ctx.globalAlpha=Math.max(0,1-s.life/s.dur);
+        ctx.translate(s.x,s.y); ctx.rotate(s.rot); ctx.fillStyle=s.col;
+        ctx.beginPath(); ctx.moveTo(0,-s.size); ctx.lineTo(s.size*0.8,s.size*0.6); ctx.lineTo(-s.size*0.8,s.size*0.6); ctx.closePath(); ctx.fill(); ctx.restore(); } },
+    drawFlash(){ if(flashT>0){ ctx.save(); ctx.globalAlpha=(flashT/flashDur)*0.4; ctx.fillStyle=flashCol; ctx.fillRect(0,0,W,H); ctx.restore(); } },
+    clear(){ parts=[]; shards=[]; rings=[]; shake=0; flashT=0; },
+  };
+})();
+
+// ---- Store（file://ではlocalStorageが例外を投げる環境があるためガード必須） --
+const Store = {
+  key: 'neo_survivor_best', mem: 0,
+  get(){ try{ return +(localStorage.getItem(this.key)||0); }catch(e){ return this.mem; } },
+  set(v){ this.mem=v; try{ localStorage.setItem(this.key, v); }catch(e){} },
+};
+// 榊原千唐：永続の「積み上がる実感」用スタッツ（累計撃破数・最高到達レベル）
+const LifeStats = {
+  memK:0, memL:0,
+  getKills(){ try{ return +(localStorage.getItem('neo_survivor_lifekills')||0); }catch(e){ return this.memK; } },
+  getMaxLv(){ try{ return +(localStorage.getItem('neo_survivor_maxlv')||0); }catch(e){ return this.memL; } },
+  add(kills, lv){
+    const k=this.getKills()+kills; this.memK=k; try{ localStorage.setItem('neo_survivor_lifekills', k); }catch(e){}
+    const l=Math.max(this.getMaxLv(), lv); this.memL=l; try{ localStorage.setItem('neo_survivor_maxlv', l); }catch(e){}
+  },
+};
+let seenIntro = (function(){ try{ return localStorage.getItem('neo_survivor_intro')==='1'; }catch(e){ return false; } })();
+
+// ---- Draw helpers --------------------------------------------------------
+function clearBG(){ ctx.fillStyle='#0a0e22'; ctx.fillRect(0,0,W,H); }
+function rrect(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+function overlay(a){ ctx.fillStyle='rgba(0,0,0,'+a+')'; ctx.fillRect(0,0,W,H); }
+
+// ---- Main loop（例外はerrbarへ、落とさない） ------------------------------
+let lastT=0;
+function loop(t){ const dt = lastT ? Math.min(50, t-lastT) : 16; lastT=t;
+  try {
+    const frozen = state==='play' && G && G.hitstop>0;      // ヒットストップ：時が止まる
+    if (frozen){ G.hitstop-=dt; }
+    else {
+      if (state==='play') update(dt);
+      FX.update(dt);
+    }
+    render(); Input.clearEdges();
+  } catch(err){ showErr(err.message+' ['+((err.stack||'').split('\n')[1]||'').trim()+']'); }
+  requestAnimationFrame(loop); }
+
+/* =========================================================================
+   ==== GAME ====  ネオ・サバイバー v02
+   複数武器／毎分ボス＋宝箱／アイテム／コンボ／ダメージ数字／10分クリア
+   ========================================================================= */
+
+const CONFIG = {
+  playerSpeed: 2.6,
+  playerR: 13,
+  baseMaxHP: 100,
+  spawnStartMs: 1050,
+  spawnMinMs: 220,
+  bossEveryMs: 60000,
+  ringEveryMs: 75000,
+  winMs: 600000,           // 10分生存でクリア
+};
+
+const ENEMY_TYPES = {
+  grunt:  { r:12, hp:22, speed:1.15, dmg:8,  col:'#ff5a6e', xp:1, score:1 },
+  fast:   { r:9,  hp:12, speed:2.05, dmg:6,  col:'#ffe14d', xp:1, score:1 },
+  tank:   { r:18, hp:70, speed:0.75, dmg:16, col:'#b06cff', xp:3, score:3 },
+  brute:  { r:24, hp:180,speed:0.62, dmg:24, col:'#ff8a3d', xp:6, score:6 },
+  bomber: { r:13, hp:30, speed:1.0,  dmg:10, col:'#7dff6a', xp:2, score:2 },   // 死ぬと弾をばら撒く
+};
+
+function newGame(){
+  G = {
+    x: W/2, y: H/2,
+    speed: CONFIG.playerSpeed,
+    maxhp: CONFIG.baseMaxHP,
+    hp: CONFIG.baseMaxHP,
+    regen: 0,
+    pickup: 70,
+    dmgMul: 1, rateMul: 1,
+    weapons: {
+      shot: { cool:0, rate:620, damage:20, projSpeed:6.2, projR:6, count:1, pierce:0, life:900 },
+      orbit: null,          // { orbs, r, dmg, angle }
+      nova:  null,          // { count, dmg, rate, cool }
+      bolt:  null,          // { targets, dmg, rate, cool }
+    },
+    aimx: 0, aimy: -1,
+    enemies: [], projs: [], gems: [], ebullets: [], items: [], chests: [],
+    dnums: [], boltFx: [],
+    time: 0, kills: 0, level: 1, xp: 0, xpNext: 5,
+    spawnCool: 800,
+    bossTimer: CONFIG.bossEveryMs, bossNo: 0, warnT: 0, warnMsg: '',
+    ringTimer: CONFIG.ringEveryMs,
+    combo: 0, comboT: 0, maxCombo: 0,
+    hurtCd: 0, flash: 0, heartT: 0,
+    trail: [], ang: -Math.PI/2, moving: false, hitstop: 0,
+    choices: [], rerolls: 2, chestPending: false,
+    won: false, endless: false,
+    bg: makeStars(),
+  };
+}
+
+function makeStars(){ const s=[]; for(let i=0;i<96;i++){ const layer=1+randi(3);   // 3層パララックス
+  s.push({x:Math.random()*W,y:Math.random()*H,r:0.3+layer*0.45+Math.random()*0.5,a:0.1+layer*0.13,layer}); } return s; }
+
+// ---- Update --------------------------------------------------------------
+function update(dt){
+  const f = dt/16.67;
+  const g = G;
+  g.time += dt;
+  const mins = g.time/60000;
+
+  // クリア判定
+  if (!g.won && !g.endless && g.time>=CONFIG.winMs){ winGame(); return; }
+
+  // --- movement ---
+  let mx=0, my=0, mag=1;
+  if (Input.held('ArrowLeft')||Input.held('KeyA')) mx-=1;
+  if (Input.held('ArrowRight')||Input.held('KeyD')) mx+=1;
+  if (Input.held('ArrowUp')||Input.held('KeyW')) my-=1;
+  if (Input.held('ArrowDown')||Input.held('KeyS')) my+=1;
+  // v10：キー入力が無いときだけタッチスティックを読む（PCの操作感は不変）。mはアナログの倒し具合
+  if (!mx && !my){ const tv=Stick.vec(); if (tv){ mx=tv.x; my=tv.y; mag=tv.m; } }
+  if (mx||my){ const l=Math.hypot(mx,my)||1; mx/=l; my/=l; g.aimx=mx; g.aimy=my; mx*=mag; my*=mag; }
+  g.x = clamp(g.x + mx*g.speed*f, CONFIG.playerR, W-CONFIG.playerR);
+  g.y = clamp(g.y + my*g.speed*f, CONFIG.playerR, H-CONFIG.playerR);
+  // 星のパララックス（移動と逆方向に層ごとの速度で流す）＋残像トレイル
+  g.moving = !!(mx||my);
+  g.ang = Math.atan2(g.aimy, g.aimx);
+  if (g.moving){ for (const s of g.bg){ s.x-=mx*0.3*s.layer*f; s.y-=my*0.3*s.layer*f;
+    if(s.x<0)s.x+=W; else if(s.x>W)s.x-=W; if(s.y<0)s.y+=H; else if(s.y>H)s.y-=H; } }
+  g.trail.push({x:g.x, y:g.y, ang:g.ang}); if (g.trail.length>12) g.trail.shift();
+
+  // --- regen / 低HP心音 ---
+  if (g.regen>0 && g.hp<g.maxhp) g.hp = Math.min(g.maxhp, g.hp + g.regen*dt/1000);
+  if (g.hp/g.maxhp < 0.3){ g.heartT-=dt; if (g.heartT<=0){ g.heartT=800; SFX.heart(); } }
+
+  // --- spawning ---
+  g.spawnCool -= dt;
+  if (g.spawnCool<=0){
+    const interval = Math.max(CONFIG.spawnMinMs, CONFIG.spawnStartMs - mins*180);
+    g.spawnCool = interval;
+    const batch = Math.min(7, 1 + Math.floor(mins*0.8));   // 終盤(7.5分〜)の物量インフレに上限キャップ
+    for (let i=0;i<batch;i++) spawnEnemy(mins);
+  }
+
+  // --- ボス出現タイマー ---
+  g.bossTimer -= dt;
+  if (g.bossTimer<=0){
+    g.bossTimer = CONFIG.bossEveryMs;
+    spawnBoss(mins);
+  }
+  // --- 包囲イベント ---
+  g.ringTimer -= dt;
+  if (g.ringTimer<=0){
+    g.ringTimer = CONFIG.ringEveryMs;
+    spawnRing(mins);
+  }
+  if (g.warnT>0) g.warnT-=dt;
+
+  // --- weapons ---
+  updateShot(dt);
+  updateOrbit(dt,f);
+  updateNova(dt);
+  updateBolt(dt);
+
+  // --- projectiles ---
+  for (const p of g.projs){ p.x += p.vx*f; p.y += p.vy*f; p.age += dt; }
+  for (const p of g.projs){
+    if (p.dead) continue;
+    for (const e of g.enemies){
+      if (e.dead) continue;
+      const rr = p.r + e.r;
+      if ((p.x-e.x)**2 + (p.y-e.y)**2 <= rr*rr && !p.hitSet.has(e)){
+        p.hitSet.add(e);
+        damageEnemy(e, p.dmg, p.x, p.y);
+        FX.burst(p.x,p.y,'#bfe4ff',4,2.5);
+        if (p.hitSet.size > p.pierce){ p.dead=true; break; }
+      }
+    }
+  }
+  g.projs = g.projs.filter(p=>!p.dead && p.age<p.life && p.x>-30 && p.x<W+30 && p.y>-30 && p.y<H+30);
+
+  // --- enemy bullets ---
+  for (const b of g.ebullets){ b.x += b.vx*f; b.y += b.vy*f; b.age += dt; }
+  g.hurtCd -= dt; g.flash = Math.max(0, g.flash - dt);
+  for (const b of g.ebullets){
+    if (b.age>b.life) { b.dead=true; continue; }
+    const rr=b.r+CONFIG.playerR;
+    if ((b.x-g.x)**2+(b.y-g.y)**2<=rr*rr && g.hurtCd<=0){
+      hurtPlayer(b.dmg); b.dead=true;
+    }
+  }
+  g.ebullets = g.ebullets.filter(b=>!b.dead && b.x>-20 && b.x<W+20 && b.y>-20 && b.y<H+20);
+
+  // --- enemies move & contact ---
+  for (const e of g.enemies){
+    if (e.dead) continue;
+    let dx=g.x-e.x, dy=g.y-e.y; const d=Math.hypot(dx,dy)||1; dx/=d; dy/=d;
+    e.x += dx*e.speed*f; e.y += dy*e.speed*f;
+    if (e.orbCd>0) e.orbCd-=dt;
+    const rr = e.r + CONFIG.playerR;
+    if (d < rr && g.hurtCd<=0){ hurtPlayer(e.dmg); if (state!=='play') return; }
+  }
+  separateEnemies(f);
+  g.enemies = g.enemies.filter(e=>!e.dead);
+
+  // --- gems ---
+  for (const gem of g.gems){
+    const dx=g.x-gem.x, dy=g.y-gem.y, d=Math.hypot(dx,dy)||1;
+    if (gem.mag || d < g.pickup){ const pull=gem.mag?9:Math.min(6,1.5+(g.pickup-d)*0.12);
+      gem.x += dx/d*pull*f; gem.y += dy/d*pull*f; }
+    if (d < CONFIG.playerR+6){ gem.dead=true; gainXP(gem.val); SFX.gem(); }
+  }
+  g.gems = g.gems.filter(gem=>!gem.dead);
+
+  // --- items ---
+  for (const it of g.items){
+    const d=Math.hypot(g.x-it.x,g.y-it.y);
+    if (d < CONFIG.playerR+14){ it.dead=true; useItem(it); }
+  }
+  g.items = g.items.filter(it=>!it.dead);
+
+  // --- chests ---
+  for (const ch of g.chests){
+    const d=Math.hypot(g.x-ch.x,g.y-ch.y);
+    if (d < CONFIG.playerR+16){ ch.dead=true; openChest(); }
+  }
+  g.chests = g.chests.filter(ch=>!ch.dead);
+
+  // --- combo timer ---
+  if (g.comboT>0){ g.comboT-=dt; if (g.comboT<=0) g.combo=0; }
+
+  // --- damage numbers ---
+  for (const dn of g.dnums){ dn.t+=dt; dn.y-=0.8*f; }
+  g.dnums = g.dnums.filter(dn=>dn.t<700);
+  for (const bf of g.boltFx){ bf.t+=dt; }
+  g.boltFx = g.boltFx.filter(bf=>bf.t<170);
+
+  // --- BGM切替（HP危機は緊迫曲＞ボス戦曲＞通常曲。ヒステリシスでちらつき防止） ---
+  const wasPinch = g._pinch;
+  if (g.hp < g.maxhp*0.22) g._pinch=true; else if (g.hp > g.maxhp*0.32) g._pinch=false;
+  if (g._pinch && !wasPinch) SFX.alarm();     // 石坂v09：危機に落ちた瞬間だけ一度きりの警報（曲の切替に気づかせる）
+  SFX.setBGMMode(g._pinch ? 'pinch' : g.enemies.some(e=>e.boss) ? 'boss' : 'play');
+}
+
+// ---- 武器処理 --------------------------------------------------------------
+function updateShot(dt){
+  const g=G, wp=g.weapons.shot;
+  wp.cool -= dt;
+  if (wp.cool<=0 && g.enemies.length>0){
+    wp.cool = wp.rate*g.rateMul;
+    const targets = nearestEnemies(wp.count);
+    for (let i=0;i<wp.count;i++){
+      let tx,ty;
+      if (targets[i]){ tx=targets[i].x; ty=targets[i].y; }
+      else if (targets[0]){ tx=targets[0].x; ty=targets[0].y; }
+      else { tx=g.x+g.aimx*100; ty=g.y+g.aimy*100; }
+      let ang=Math.atan2(ty-g.y, tx-g.x);
+      if (i>0 && !targets[i]) ang += (Math.random()-0.5)*0.5;
+      g.projs.push({ x:g.x, y:g.y, vx:Math.cos(ang)*wp.projSpeed, vy:Math.sin(ang)*wp.projSpeed,
+        r:wp.projR, dmg:wp.damage*g.dmgMul, pierce:wp.pierce, life:wp.life, age:0, hitSet:new Set(), dead:false, col:'#dff1ff' });
+    }
+    SFX.shoot();
+  }
+}
+function updateOrbit(dt,f){
+  const g=G, ob=g.weapons.orbit;
+  if (!ob) return;
+  ob.angle = (ob.angle + 0.055*f) % TAU;
+  for (let i=0;i<ob.orbs;i++){
+    const a = ob.angle + i*TAU/ob.orbs;
+    const ox = g.x + Math.cos(a)*ob.r, oy = g.y + Math.sin(a)*ob.r;
+    for (const e of g.enemies){
+      if (e.dead || e.orbCd>0) continue;
+      const rr = 11 + e.r;
+      if ((ox-e.x)**2+(oy-e.y)**2 <= rr*rr){
+        e.orbCd = 380;
+        damageEnemy(e, ob.dmg*g.dmgMul, ox, oy);
+        FX.burst(ox,oy,'#c9a6ff',3,2);
+      }
+    }
+  }
+}
+function updateNova(dt){
+  const g=G, nv=g.weapons.nova;
+  if (!nv) return;
+  nv.cool -= dt;
+  if (nv.cool<=0){
+    nv.cool = nv.rate*g.rateMul;
+    for (let i=0;i<nv.count;i++){
+      const a = i*TAU/nv.count + Math.random()*0.2;
+      g.projs.push({ x:g.x, y:g.y, vx:Math.cos(a)*4.6, vy:Math.sin(a)*4.6,
+        r:7, dmg:nv.dmg*g.dmgMul, pierce:1, life:800, age:0, hitSet:new Set(), dead:false, col:'#ffb266' });
+    }
+    FX.burst(g.x,g.y,'#ffb266',12,4); SFX.nova();
+  }
+}
+function updateBolt(dt){
+  const g=G, bt=g.weapons.bolt;
+  if (!bt) return;
+  bt.cool -= dt;
+  if (bt.cool<=0 && g.enemies.length>0){
+    bt.cool = bt.rate*g.rateMul;
+    const targets = nearestEnemies(bt.targets);
+    for (const e of targets){
+      damageEnemy(e, bt.dmg*g.dmgMul, e.x, e.y-10);
+      g.boltFx.push({ x1:g.x, y1:g.y, x2:e.x, y2:e.y, t:0 });
+      FX.burst(e.x,e.y,'#8fe8ff',6,3);
+    }
+    SFX.bolt();
+  }
+}
+
+function damageEnemy(e, dmg, x, y){
+  e.hp -= dmg;
+  G.dnums.push({ x:x+randi(10)-5, y:y-8, txt:String(Math.round(dmg)), col: dmg>=60?'#ffe27a':'#fff', t:0 });
+  if (e.boss) SFX.bossHit(); else SFX.hit();     // 石坂v09：ボスに当てた時だけ重い低音＝硬さが耳で分かる
+  if (e.hp<=0 && !e.dead) killEnemy(e);
+}
+
+function hurtPlayer(dmg){
+  const g=G;
+  g.hp -= dmg; g.hurtCd = 550; g.flash = 220;
+  FX.shake(7); SFX.hurt();
+  if (g.hp<=0){ g.hp=0; lose(); }
+}
+
+function separateEnemies(f){
+  const es=G.enemies;
+  for (let i=0;i<es.length;i++){
+    const a=es[i]; if(a.dead) continue;
+    for (let j=i+1;j<es.length;j++){
+      const b=es[j]; if(b.dead) continue;
+      const dx=b.x-a.x, dy=b.y-a.y; const rr=a.r+b.r; const d2=dx*dx+dy*dy;
+      if (d2>0 && d2 < rr*rr){ const d=Math.sqrt(d2); const push=(rr-d)*0.5; const ux=dx/d, uy=dy/d;
+        a.x-=ux*push*f; a.y-=uy*push*f; b.x+=ux*push*f; b.y+=uy*push*f; }
+    }
+  }
+}
+
+function edgeSpawnPos(){
+  const m=30; const side=randi(4);
+  if (side===0) return [Math.random()*W, -m];
+  if (side===1) return [W+m, Math.random()*H];
+  if (side===2) return [Math.random()*W, H+m];
+  return [-m, Math.random()*H];
+}
+
+function spawnEnemy(mins){
+  let pool=['grunt'];
+  if (mins>0.5) pool.push('fast');
+  if (mins>1.5) pool.push('grunt','tank');
+  if (mins>2) pool.push('bomber');
+  if (mins>3) pool.push('fast','tank','bomber');
+  if (mins>4.5) pool.push('brute');
+  const key = rngPick(pool);
+  const base = ENEMY_TYPES[key];
+  const hpScale = 1 + mins*0.35;
+  const [x,y] = edgeSpawnPos();
+  G.enemies.push({ type:key, x, y, r:base.r, hp:base.hp*hpScale, maxhp:base.hp*hpScale,
+    speed:base.speed, dmg:base.dmg, col:base.col, xp:base.xp, score:base.score, dead:false, orbCd:0 });
+}
+
+function spawnBoss(mins){
+  G.bossNo++;
+  const hp = 500 * (1 + mins*0.55) * (1 + (G.bossNo-1)*0.3);
+  const [x,y] = edgeSpawnPos();
+  G.enemies.push({ type:'boss', boss:true, x, y, r:34, hp, maxhp:hp,
+    speed:0.85, dmg:30, col:'#ff3a5e', xp:20, score:30, dead:false, orbCd:0 });
+  G.warnT = 1800;
+  G.warnMsg = G.bossNo===1?'⚠ 群れの先触れ、接近 ⚠': G.bossNo===2?'⚠ 二番隊、来ます ⚠':'⚠ 群れの中核、殺到 ⚠';
+  FX.shake(8); FX.flash('#ff3a5e',0.28); FX.ring(x,y,'#ff3a5e',150,0.6,6); SFX.warn();   // ボス降臨＝赤い警告閃光
+}
+
+function spawnRing(mins){
+  const n = 12 + Math.floor(mins*1.5);
+  const R = 330;
+  for (let i=0;i<n;i++){
+    const a=i*TAU/n;
+    const base=ENEMY_TYPES.fast, hpScale=1+mins*0.35;
+    G.enemies.push({ type:'fast', x:G.x+Math.cos(a)*R, y:G.y+Math.sin(a)*R, r:base.r,
+      hp:base.hp*hpScale, maxhp:base.hp*hpScale, speed:base.speed, dmg:base.dmg,
+      col:base.col, xp:base.xp, score:base.score, dead:false, orbCd:0 });
+  }
+  G.warnT = 1600; G.warnMsg = mins<3?'⚠ 側面から囲まれた ⚠':'⚠ 全周を、囲まれた ⚠';
+  SFX.warn();
+}
+
+function killEnemy(e){
+  e.dead=true; G.kills++;
+  FX.burst(e.x,e.y,e.col,e.boss?30:10,e.boss?6:4);
+  FX.shard(e.x,e.y,e.col,e.boss?14:6);                       // 破片が飛び散る
+  FX.shake(e.boss?10:2);
+  if (e.boss){ G.hitstop=150;                                  // ボス撃破ヒットストップ
+    FX.ring(e.x,e.y,'#ffe27a',175,0.6,7); FX.ring(e.x,e.y,'#ffffff',95,0.42,3); FX.flash('#ffdd66',0.22); } // 撃破＝二重の衝撃波＋金の閃光
+  else if (e.type==='brute'){ G.hitstop=60; FX.ring(e.x,e.y,e.col,72,0.4,4); }   // 巨体撃破に小さな衝撃波
+  // コンボ（キル音はコンボに応じて半音ずつ上がる）
+  G.combo++; G.comboT=2000; G.maxCombo=Math.max(G.maxCombo,G.combo);
+  SFX.kill(G.combo);
+  G.gems.push({ x:e.x, y:e.y, val:e.xp, dead:false });
+  if (G.combo>0 && G.combo%15===0){
+    G.dnums.push({ x:G.x, y:G.y-30, txt:'COMBO x'+G.combo+'!', col:'#ffe27a', t:0 });
+    SFX.comboMile();                              // 石坂v09：15連ごとの節目にきらめきの三音
+    gainXP(Math.floor(G.combo/5));
+  }
+  // ボスは宝箱を落とす
+  if (e.boss){ SFX.bossClear(); setTimeout(()=>SFX.chestDrop(), 560);   // 石坂v09：ファンファーレの後に「宝箱が落ちた」きらめき
+    G.chests.push({ x:clamp(e.x,30,W-30), y:clamp(e.y,30,H-30), dead:false }); }
+  // 死亡時に弾をばら撒く
+  else if (e.type==='bomber'){
+    for (let i=0;i<7;i++){ const a=i*TAU/7;
+      G.ebullets.push({ x:e.x, y:e.y, vx:Math.cos(a)*2.3, vy:Math.sin(a)*2.3, r:5, dmg:10, age:0, life:2400, dead:false }); }
+    FX.burst(e.x,e.y,'#7dff6a',10,3); SFX.bomberPop();                 // 石坂v09：弾がばら撒かれた警告音（従来は無音）
+  }
+  // アイテムドロップ
+  else {
+    const r=Math.random();
+    if (r<0.012) G.items.push({ kind:'bomb', x:e.x, y:e.y, dead:false });
+    else if (r<0.032) G.items.push({ kind:'magnet', x:e.x, y:e.y, dead:false });
+    else if (r<0.062) G.items.push({ kind:'meat', x:e.x, y:e.y, dead:false });
+    if (r<0.062) SFX.itemDrop();                                       // 石坂v09：落ちた瞬間が耳で分かる（見落とし防止）
+  }
+}
+
+function useItem(it){
+  const g=G;
+  if (it.kind==='bomb'){
+    let n=0;
+    for (const e of g.enemies){ if (!e.dead){ damageEnemy(e, 150*g.dmgMul, e.x, e.y); n++; } }
+    FX.shake(12); FX.burst(g.x,g.y,'#ffdd55',40,7); SFX.bomb(); g.hitstop=120;
+    FX.ring(g.x,g.y,'#ffdd55',W*0.95,0.55,9); FX.ring(g.x,g.y,'#fff',W*0.5,0.4,4); FX.flash('#ffdd55',0.3);   // 画面一掃＝全面を走る衝撃波
+    g.dnums.push({ x:g.x, y:g.y-40, txt:'💣 大爆発！', col:'#ffdd55', t:0 });
+  } else if (it.kind==='magnet'){
+    for (const gem of g.gems) gem.mag=true;
+    SFX.magnet();
+    g.dnums.push({ x:g.x, y:g.y-40, txt:'🧲 全回収！', col:'#8fe8ff', t:0 });
+  } else if (it.kind==='meat'){
+    g.hp = Math.min(g.maxhp, g.hp+40);
+    SFX.meat(); FX.burst(g.x,g.y,'#7dff9a',10,3);
+    g.dnums.push({ x:g.x, y:g.y-40, txt:'+40 HP', col:'#7dff9a', t:0 });
+  }
+}
+
+function openChest(){
+  SFX.chest();
+  G.hp = Math.min(G.maxhp, G.hp+25);
+  G.chestPending = true;
+  triggerLevelUp();     // 宝箱＝強化3択（+HP25）
+}
+
+function nearestEnemies(n){
+  const g=G;
+  return g.enemies.filter(e=>!e.dead)
+    .map(e=>({e, d:(e.x-g.x)**2+(e.y-g.y)**2}))
+    .sort((a,b)=>a.d-b.d).slice(0,n).map(o=>o.e);
+}
+
+function gainXP(v){
+  G.xp += v;
+  while (G.xp >= G.xpNext){
+    G.xp -= G.xpNext;
+    G.level++;
+    G.xpNext = Math.round(G.xpNext * 1.35 + 3);
+    triggerLevelUp();
+  }
+}
+
+// ---- 強化候補（武器獲得・武器強化・ステータス） ----------------------------
+function buildUpgradePool(){
+  const g=G, wp=g.weapons, pool=[];
+  // ステータス系
+  pool.push(
+    { name:'パワーアップ',  desc:'全武器ダメージ +25%', icon:'⚔', apply:()=>{ g.dmgMul*=1.25; } },
+    { name:'高速連射',      desc:'全武器の間隔 -13%',   icon:'⚡', apply:()=>{ g.rateMul*=0.87; } },
+    { name:'俊足',          desc:'移動速度 +14%',       icon:'👟', apply:()=>{ g.speed*=1.14; } },
+    { name:'鉄壁',          desc:'最大HP +25 / 全回復', icon:'❤', apply:()=>{ g.maxhp+=25; g.hp=g.maxhp; } },
+    { name:'マグネット',    desc:'回収範囲 +45%',       icon:'🧲', apply:()=>{ g.pickup*=1.45; } },
+    { name:'再生',          desc:'HP自動回復 +0.6/秒',  icon:'✚', apply:()=>{ g.regen+=0.6; } },
+  );
+  // ショット系
+  pool.push(
+    { name:'マルチショット', desc:'ショット弾数 +1',           icon:'✳', apply:()=>{ wp.shot.count+=1; } },
+    { name:'貫通弾',        desc:'ショット貫通 +1',           icon:'➹', apply:()=>{ wp.shot.pierce+=1; } },
+    { name:'ビッグショット', desc:'弾サイズ+40% / ダメ+10%',   icon:'●', apply:()=>{ wp.shot.projR*=1.4; wp.shot.damage*=1.1; } },
+  );
+  // 新武器 or 武器強化
+  if (!wp.orbit) pool.push({ name:'オービット獲得', desc:'周回する光球が敵を削る', icon:'🪐',
+    apply:()=>{ wp.orbit={ orbs:2, r:56, dmg:14, angle:0 }; } });
+  else pool.push({ name:'オービット強化', desc:'光球 +1 / ダメ +20%', icon:'🪐',
+    apply:()=>{ wp.orbit.orbs+=1; wp.orbit.dmg*=1.2; } });
+  if (!wp.nova) pool.push({ name:'ノヴァ獲得', desc:'周期的に全方位へ弾をばら撒く', icon:'💥',
+    apply:()=>{ wp.nova={ count:8, dmg:14, rate:2600, cool:600 }; } });
+  else pool.push({ name:'ノヴァ強化', desc:'弾数 +3 / 間隔 -12%', icon:'💥',
+    apply:()=>{ wp.nova.count+=3; wp.nova.rate*=0.88; } });
+  if (!wp.bolt) pool.push({ name:'サンダー獲得', desc:'最寄りの敵へ自動で落雷', icon:'⚡',
+    apply:()=>{ wp.bolt={ targets:2, dmg:32, rate:1900, cool:500 }; } });
+  else pool.push({ name:'サンダー強化', desc:'対象 +1 / ダメ +25%', icon:'⚡',
+    apply:()=>{ wp.bolt.targets+=1; wp.bolt.dmg*=1.25; } });
+  return pool;
+}
+
+function triggerLevelUp(){
+  const pool = buildUpgradePool();
+  const picks=[];
+  for (let i=0;i<3 && pool.length;i++){ const idx=randi(pool.length); picks.push(pool[idx]); pool.splice(idx,1); }
+  G.choices = picks;
+  state='levelup';
+  FX.burst(G.x,G.y,'#ffe27a',20,4);
+  FX.ring(G.x,G.y,'#ffe27a',130,0.5,5); FX.flash('#ffe27a',0.18);   // 昇格の光が外へ弾ける
+  SFX.levelup();
+}
+
+function rerollChoices(){
+  if (G.rerolls<=0) return;
+  G.rerolls--;
+  const pool = buildUpgradePool();
+  const picks=[];
+  for (let i=0;i<3 && pool.length;i++){ const idx=randi(pool.length); picks.push(pool[idx]); pool.splice(idx,1); }
+  G.choices = picks;
+  SFX.cursor();     // 石坂v09：リロール（選び直し）は決定音と別の軽いカーソル音に
+}
+
+function chooseUpgrade(i){
+  const u = G.choices[i];
+  if (!u) return;
+  u.apply();
+  G.choices=[];
+  G.chestPending=false;
+  state='play';
+  if (/獲得/.test(u.name)) SFX.getWeapon(); else SFX.blip();   // 石坂v09：新武器の獲得だけ格上げの4音（統一モチーフE–B–E）
+}
+
+function pickAtPointer(ev){
+  const rect=C.getBoundingClientRect();
+  const mx=(ev.clientX-rect.left)*(W/(rect.width||W));
+  const my=(ev.clientY-rect.top)*(H/(rect.height||H));
+  if (G.rerolls>0 && inRect(btnReroll(),mx,my)){ rerollChoices(); return; }   // v10：Eキーの無い端末用リロールボタン
+  for (let i=0;i<3;i++){ const r=cardRect(i); if(mx>=r.x&&mx<=r.x+r.w&&my>=r.y&&my<=r.y+r.h){ chooseUpgrade(i); return; } }
+}
+
+function cardRect(i){ const cw=170, ch=210, gap=20; const total=cw*3+gap*2; const sx=(W-total)/2; return { x:sx+i*(cw+gap), y:H/2-ch/2+20, w:cw, h:ch }; }
+
+// ---- Render --------------------------------------------------------------
+function render(){
+  clearBG();
+  // ネオングリッド（うっすら明滅）
+  const ga=0.045+0.02*Math.sin(clock()/900);
+  ctx.strokeStyle='rgba(80,130,255,'+ga+')'; ctx.lineWidth=1;
+  for(let x=32;x<W;x+=64){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  for(let y=32;y<H;y+=64){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+  if (G && G.bg){ for(const s of G.bg){ ctx.globalAlpha=s.a; ctx.fillStyle=s.layer===3?'#cfe0ff':'#9fb0e8';
+    ctx.beginPath(); ctx.arc(s.x,s.y,s.r,0,TAU); ctx.fill(); } ctx.globalAlpha=1; }
+
+  if (state==='title'){ renderTitle(); return; }
+  if (state==='intro'){ renderIntro(); return; }
+
+  FX.preDraw();
+
+  // gems
+  for (const gem of G.gems){ ctx.fillStyle= gem.val>=3?'#b06cff':'#4dffa6'; ctx.beginPath();
+    const s=gem.val>=3?5:4; ctx.moveTo(gem.x,gem.y-s); ctx.lineTo(gem.x+s,gem.y); ctx.lineTo(gem.x,gem.y+s); ctx.lineTo(gem.x-s,gem.y); ctx.closePath(); ctx.fill(); }
+
+  // items / chests
+  ctx.font='18px "Segoe UI"'; ctx.textAlign='center';
+  for (const it of G.items){ const icon = it.kind==='bomb'?'💣': it.kind==='magnet'?'🧲':'🍖';
+    const bob=Math.sin(clock()/300+it.x)*3; ctx.fillText(icon, it.x, it.y+bob); }
+  ctx.font='22px "Segoe UI"';
+  for (const ch of G.chests){ const bob=Math.sin(clock()/280)*3;
+    ctx.save(); ctx.shadowColor='#ffe27a'; ctx.shadowBlur=14; ctx.fillText('🎁', ch.x, ch.y+bob); ctx.restore(); }
+
+  // enemies
+  for (const e of G.enemies){ drawEnemy(e); }
+
+  // enemy bullets
+  for (const b of G.ebullets){ ctx.fillStyle='#7dff6a'; ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,TAU); ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.beginPath(); ctx.arc(b.x,b.y,2,0,TAU); ctx.fill(); }
+
+  // projectiles
+  for (const p of G.projs){ ctx.save(); ctx.shadowColor=p.col||'#8fd0ff'; ctx.shadowBlur=10; ctx.fillStyle=p.col||'#dff1ff';
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,TAU); ctx.fill(); ctx.restore(); }
+
+  // bolt lightning
+  for (const bf of G.boltFx){
+    ctx.save(); ctx.globalAlpha=1-bf.t/170; ctx.strokeStyle='#aef0ff'; ctx.lineWidth=2.5;
+    ctx.beginPath(); ctx.moveTo(bf.x1,bf.y1);
+    const segs=5;
+    for (let i=1;i<=segs;i++){ const t=i/segs;
+      ctx.lineTo(lerp(bf.x1,bf.x2,t)+(i<segs?(Math.random()-0.5)*18:0), lerp(bf.y1,bf.y2,t)+(i<segs?(Math.random()-0.5)*18:0)); }
+    ctx.stroke(); ctx.restore();
+  }
+
+  // orbit orbs
+  if (G.weapons.orbit){ const ob=G.weapons.orbit;
+    for (let i=0;i<ob.orbs;i++){ const a=ob.angle+i*TAU/ob.orbs;
+      const ox=G.x+Math.cos(a)*ob.r, oy=G.y+Math.sin(a)*ob.r;
+      ctx.save(); ctx.shadowColor='#c9a6ff'; ctx.shadowBlur=12; ctx.fillStyle='#c9a6ff';
+      ctx.beginPath(); ctx.arc(ox,oy,8,0,TAU); ctx.fill(); ctx.restore(); } }
+
+  drawPlayer();
+  FX.postDraw();
+
+  // damage numbers
+  for (const dn of G.dnums){ ctx.save(); ctx.globalAlpha=Math.max(0,1-dn.t/700);
+    ctx.fillStyle=dn.col; ctx.font='bold '+(dn.txt.length>4?15:13)+'px "Segoe UI"'; ctx.textAlign='center';
+    ctx.fillText(dn.txt, dn.x, dn.y); ctx.restore(); }
+
+  // hurt flash
+  if (G.flash>0){ ctx.fillStyle='rgba(255,40,60,'+(G.flash/220*0.35)+')'; ctx.fillRect(0,0,W,H); }
+  // 低HPビネット
+  if (G.hp/G.maxhp<0.3){ const a=0.16+0.1*Math.sin(clock()/250);
+    const vg=ctx.createRadialGradient(W/2,H/2,H*0.35,W/2,H/2,H*0.72);
+    vg.addColorStop(0,'rgba(255,0,40,0)'); vg.addColorStop(1,'rgba(255,0,40,'+a+')');
+    ctx.fillStyle=vg; ctx.fillRect(0,0,W,H); }
+
+  FX.drawFlash();     // 大事件のインパクトフラッシュ（シーンの上・HUDの下）
+  drawHUD();
+  Stick.draw();       // v10：指を置いた場所に現れる浮遊スティック（HUDの上・オーバーレイの下）
+
+  // 警告テロップ
+  if (G.warnT>0){ ctx.save(); ctx.globalAlpha=0.5+0.5*Math.sin(clock()/90);
+    ctx.textAlign='center'; ctx.fillStyle='#ff5d5d'; ctx.font='bold 30px "Segoe UI"';
+    ctx.fillText(G.warnMsg, W/2, 130); ctx.restore(); }
+
+  if (state==='pause') { overlay(0.6); ctx.textAlign='center'; ctx.fillStyle='#7ec8ff'; ctx.font='bold 40px "Segoe UI"'; ctx.fillText('PAUSE',W/2,H/2); ctx.fillStyle='#aaa'; ctx.font='15px "Segoe UI"'; ctx.fillText(IS_TOUCH?'画面をタップで再開':'P またはクリックで再開',W/2,H/2+34); }
+  if (state==='levelup') renderLevelUp();
+  if (state==='win') renderWin();
+  if (state==='over') renderOver();
+}
+
+function shipPath(s){ ctx.beginPath(); ctx.moveTo(0,-s); ctx.lineTo(s*0.75,s*0.85); ctx.lineTo(0,s*0.4); ctx.lineTo(-s*0.75,s*0.85); ctx.closePath(); }
+
+function drawPlayer(){
+  const g=G;
+  // 残像トレイル
+  for (let i=0;i<g.trail.length;i++){ const t=g.trail[i];
+    ctx.save(); ctx.globalAlpha=(i+1)/g.trail.length*0.22;
+    ctx.translate(t.x,t.y); ctx.rotate(t.ang+Math.PI/2);
+    ctx.fillStyle='#39c7ff'; shipPath(11); ctx.fill(); ctx.restore(); }
+  ctx.save();
+  ctx.strokeStyle='rgba(120,200,255,0.08)'; ctx.beginPath(); ctx.arc(g.x,g.y,g.pickup,0,TAU); ctx.stroke();
+  ctx.translate(g.x,g.y); ctx.rotate(g.ang+Math.PI/2);
+  // スラスター炎（移動中のみ・ちらつき）
+  if (g.moving){ const fl=6+Math.random()*8;
+    ctx.fillStyle='rgba(255,170,60,0.9)';
+    ctx.beginPath(); ctx.moveTo(-5,12); ctx.lineTo(0,12+fl); ctx.lineTo(5,12); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='rgba(255,240,160,0.95)';
+    ctx.beginPath(); ctx.moveTo(-2.5,12); ctx.lineTo(0,12+fl*0.55); ctx.lineTo(2.5,12); ctx.closePath(); ctx.fill(); }
+  // 機体
+  ctx.shadowColor='#39c7ff'; ctx.shadowBlur=16;
+  ctx.fillStyle= g.hurtCd>350 ? '#ffd0d6' : '#bfeaff';
+  shipPath(15); ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.strokeStyle='#39c7ff'; ctx.lineWidth=1.5; shipPath(15); ctx.stroke();
+  // コックピット
+  ctx.fillStyle='#0a2c4a'; ctx.beginPath(); ctx.arc(0,-3,3.5,0,TAU); ctx.fill();
+  ctx.restore();
+}
+
+function polyPath(x,y,r,n,rot){ ctx.beginPath();
+  for(let i=0;i<n;i++){ const a=rot+i*TAU/n; const px=x+Math.cos(a)*r, py=y+Math.sin(a)*r;
+    i?ctx.lineTo(px,py):ctx.moveTo(px,py); } ctx.closePath(); }
+
+function drawEnemy(e){
+  ctx.save();
+  const aimAng = Math.atan2(G.y-e.y, G.x-e.x);      // プレイヤー方向
+  if (e.boss){
+    ctx.shadowColor=e.col; ctx.shadowBlur=22;
+    ctx.fillStyle=e.col; ctx.beginPath(); ctx.arc(e.x,e.y,e.r,0,TAU); ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.fillStyle='#a0233a';
+    ctx.beginPath(); ctx.moveTo(e.x-e.r*0.6,e.y-e.r*0.6); ctx.lineTo(e.x-e.r*0.9,e.y-e.r*1.3); ctx.lineTo(e.x-e.r*0.25,e.y-e.r*0.85); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(e.x+e.r*0.6,e.y-e.r*0.6); ctx.lineTo(e.x+e.r*0.9,e.y-e.r*1.3); ctx.lineTo(e.x+e.r*0.25,e.y-e.r*0.85); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#fff';
+    ctx.beginPath(); ctx.moveTo(e.x-e.r*0.5,e.y-e.r*0.1); ctx.lineTo(e.x-e.r*0.12,e.y+e.r*0.08); ctx.lineTo(e.x-e.r*0.5,e.y+e.r*0.22); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(e.x+e.r*0.5,e.y-e.r*0.1); ctx.lineTo(e.x+e.r*0.12,e.y+e.r*0.08); ctx.lineTo(e.x+e.r*0.5,e.y+e.r*0.22); ctx.closePath(); ctx.fill();
+  }
+  else if (e.type==='fast'){                        // 三角：プレイヤーへ機首を向ける
+    ctx.save(); ctx.translate(e.x,e.y); ctx.rotate(aimAng+Math.PI/2);
+    ctx.fillStyle=e.col;
+    ctx.beginPath(); ctx.moveTo(0,-e.r*1.25); ctx.lineTo(e.r,e.r); ctx.lineTo(-e.r,e.r); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.35)'; ctx.lineWidth=1.5; ctx.stroke();
+    ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.beginPath(); ctx.arc(0,-e.r*0.2,e.r*0.28,0,TAU); ctx.fill();
+    ctx.restore();
+  }
+  else if (e.type==='tank'){                        // 六角形の重装甲
+    ctx.fillStyle=e.col; polyPath(e.x,e.y,e.r,6,clock()/2000); ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.3)'; ctx.lineWidth=2; ctx.stroke();
+    ctx.fillStyle='rgba(0,0,0,0.35)'; polyPath(e.x,e.y,e.r*0.55,6,clock()/2000); ctx.fill();
+    ctx.fillStyle='rgba(0,0,0,0.55)';
+    ctx.beginPath(); ctx.arc(e.x-e.r*0.28,e.y-e.r*0.1,e.r*0.14,0,TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(e.x+e.r*0.28,e.y-e.r*0.1,e.r*0.14,0,TAU); ctx.fill();
+  }
+  else if (e.type==='brute'){                       // 八角形の巨体
+    ctx.fillStyle=e.col; polyPath(e.x,e.y,e.r,8,clock()/2600); ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.3)'; ctx.lineWidth=2.5; ctx.stroke();
+    ctx.fillStyle='rgba(0,0,0,0.55)';
+    ctx.beginPath(); ctx.arc(e.x-e.r*0.3,e.y-e.r*0.12,e.r*0.15,0,TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(e.x+e.r*0.3,e.y-e.r*0.12,e.r*0.15,0,TAU); ctx.fill();
+    ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(e.x-e.r*0.35,e.y+e.r*0.35); ctx.lineTo(e.x+e.r*0.35,e.y+e.r*0.35); ctx.stroke();
+  }
+  else if (e.type==='bomber'){                      // 点滅する核入り＝危険が見える
+    ctx.fillStyle=e.col; ctx.beginPath(); ctx.arc(e.x,e.y,e.r,0,TAU); ctx.fill();
+    const pl=0.5+0.5*Math.sin(clock()/140);
+    ctx.fillStyle='rgba(255,60,60,'+(0.35+0.55*pl)+')';
+    ctx.beginPath(); ctx.arc(e.x,e.y,e.r*(0.4+0.15*pl),0,TAU); ctx.fill();
+    ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(e.x,e.y,e.r*0.62,0,TAU); ctx.stroke();
+  }
+  else {                                            // grunt：従来の丸＋目
+    ctx.fillStyle=e.col; ctx.beginPath(); ctx.arc(e.x,e.y,e.r,0,TAU); ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.25)'; ctx.lineWidth=1.5; ctx.stroke();
+    ctx.fillStyle='rgba(0,0,0,0.55)';
+    ctx.beginPath(); ctx.arc(e.x-e.r*0.32,e.y-e.r*0.15,e.r*0.18,0,TAU); ctx.fill();
+    ctx.beginPath(); ctx.arc(e.x+e.r*0.32,e.y-e.r*0.15,e.r*0.18,0,TAU); ctx.fill();
+  }
+  if (e.hp<e.maxhp && !e.boss){ const bw=e.r*2; ctx.fillStyle='rgba(0,0,0,0.5)'; ctx.fillRect(e.x-bw/2,e.y-e.r-7,bw,3);
+    ctx.fillStyle='#5aff9a'; ctx.fillRect(e.x-bw/2,e.y-e.r-7,bw*clamp(e.hp/e.maxhp,0,1),3); }
+  ctx.restore();
+}
+
+function drawHUD(){
+  const g=G;
+  const bw=W-40, bx=20, by=16;
+  ctx.fillStyle='rgba(0,0,0,0.45)'; rrect(bx,by,bw,16,8); ctx.fill();
+  ctx.fillStyle='#ff506e'; rrect(bx,by,bw*clamp(g.hp/g.maxhp,0,1),16,8); ctx.fill();
+  ctx.textAlign='center'; ctx.fillStyle='#fff'; ctx.font='bold 12px "Segoe UI"';
+  ctx.fillText('HP '+Math.ceil(g.hp)+' / '+g.maxhp, W/2, by+12);
+  const yb=38;
+  ctx.fillStyle='rgba(0,0,0,0.45)'; rrect(bx,yb,bw,8,4); ctx.fill();
+  ctx.fillStyle='#4dc3ff'; rrect(bx,yb,bw*clamp(g.xp/g.xpNext,0,1),8,4); ctx.fill();
+  // ボスHPバー
+  const boss = g.enemies.find(e=>e.boss);
+  if (boss){ const yb2=52;
+    ctx.fillStyle='rgba(0,0,0,0.5)'; rrect(bx+60,yb2,bw-120,10,5); ctx.fill();
+    ctx.fillStyle='#ff3a5e'; rrect(bx+60,yb2,(bw-120)*clamp(boss.hp/boss.maxhp,0,1),10,5); ctx.fill();
+    ctx.textAlign='center'; ctx.fillStyle='#ffb0c0'; ctx.font='bold 10px "Segoe UI"'; ctx.fillText('BOSS', W/2, yb2+9); }
+  ctx.textAlign='left'; ctx.fillStyle='#ffe27a'; ctx.font='bold 20px "Segoe UI"';
+  ctx.fillText('⏱ '+fmtTime(g.time), 20, 84);
+  ctx.textAlign='center'; ctx.fillStyle='#9fe8c0'; ctx.fillText('Lv '+g.level, W/2, 84);
+  ctx.textAlign='right'; ctx.fillStyle='#ff9ab0'; ctx.fillText('☠ '+g.kills, W-20, 84);
+  // コンボ
+  if (g.combo>=5){ ctx.textAlign='center'; ctx.fillStyle='#ffe27a'; ctx.font='bold 17px "Segoe UI"';
+    ctx.fillText('🔥 x'+g.combo, W/2, 108); }
+  // 所持武器
+  ctx.textAlign='left'; ctx.font='13px "Segoe UI"'; ctx.fillStyle='#9fb0e8';
+  let wtxt='🔫x'+g.weapons.shot.count;
+  if (g.weapons.orbit) wtxt+='　🪐x'+g.weapons.orbit.orbs;
+  if (g.weapons.nova)  wtxt+='　💥x'+g.weapons.nova.count;
+  if (g.weapons.bolt)  wtxt+='　⚡x'+g.weapons.bolt.targets;
+  ctx.fillText(wtxt, 20, H-12);
+  if (IS_TOUCH){
+    // v10：キーの無い端末向け。⏸ポーズと♪消音を指で押せる位置（右下＝スティックを出す手と反対側）に置く
+    const bp=btnPause(), bs=btnSound();
+    ctx.fillStyle='rgba(10,18,44,0.62)'; rrect(bp.x,bp.y,bp.w,bp.h,12); ctx.fill();
+    ctx.strokeStyle='rgba(120,200,255,0.5)'; ctx.lineWidth=1.5; rrect(bp.x,bp.y,bp.w,bp.h,12); ctx.stroke();
+    ctx.textAlign='center'; ctx.fillStyle='#bfeaff'; ctx.font='20px "Segoe UI"';
+    ctx.fillText('⏸', bp.x+bp.w/2, bp.y+30);
+    ctx.fillStyle='rgba(10,18,44,0.62)'; rrect(bs.x,bs.y,bs.w,bs.h,10); ctx.fill();
+    ctx.strokeStyle='rgba(120,200,255,0.5)'; rrect(bs.x,bs.y,bs.w,bs.h,10); ctx.stroke();
+    ctx.fillStyle=SFX.on?'#7CFC00':'#888'; ctx.font='bold 13px "Segoe UI"';
+    ctx.fillText(SFX.on?'♪ON':'♪OFF', bs.x+bs.w/2, bs.y+21);
+  } else {
+    ctx.textAlign='right'; ctx.fillStyle=SFX.on?'#7CFC00':'#888'; ctx.font='12px "Segoe UI"';
+    ctx.fillText((SFX.on?'♪ON':'♪OFF')+' (M)', W-20, H-12);
+  }
+}
+
+function fmtTime(ms){ const s=Math.floor(ms/1000); return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); }
+
+function renderTitle(){
+  ctx.textAlign='center';
+  ctx.save(); ctx.shadowColor='#5aa6ff'; ctx.shadowBlur=24;
+  ctx.fillStyle='#fff'; ctx.font='bold 52px "Segoe UI"'; ctx.fillText('ネオ・サバイバー', W/2, 180);
+  ctx.restore();
+  ctx.fillStyle='#9fe8c0'; ctx.font='17px "Segoe UI"'; ctx.fillText('10分間、押し寄せる敵の群れを生き延びろ', W/2, 224);
+  const info = [ IS_TOUCH ? '画面をなぞって移動（指を置いた所がスティック・攻撃は自動）'
+                          : 'WASD / 矢印キーで移動（攻撃は自動）',
+                 IS_TOUCH ? 'ジェムを拾ってレベルアップ → 3択強化はカードをタップ'
+                          : 'ジェムを拾ってレベルアップ → 3択強化（Eでリロール1回）',
+                 '武器は4種：ショット / オービット / ノヴァ / サンダー',
+                 '毎分ボス出現！倒すと宝箱（強化+回復）',
+                 '💣=画面一掃　🧲=全回収　🍖=回復'];
+  ctx.font='15px "Segoe UI"'; ctx.fillStyle='#bcd'; info.forEach((t,i)=>ctx.fillText(t,W/2,280+i*28));
+  ctx.fillStyle='#6d8fae'; ctx.font='13px "Segoe UI"';
+  ctx.fillText('壊れかけたコロニーの最終防衛線。生き延びた先に、まだ何かが残っている。', W/2, 424);
+  ctx.fillStyle='#8fa8c8'; ctx.font='13px "Segoe UI"';
+  ctx.fillText('累計撃破 '+LifeStats.getKills()+' ／ 最高到達 Lv'+LifeStats.getMaxLv(), W/2, 444);
+  ctx.fillStyle='#ffb0c0'; ctx.font='14px "Segoe UI"'; ctx.fillText('自己ベスト '+fmtTime(Store.get()*1000), W/2, 468);
+  const blink=(clock()/500|0)%2===0; ctx.fillStyle=blink?'#ffe27a':'#667'; ctx.font='bold 24px "Segoe UI"';
+  ctx.fillText(IS_TOUCH?'タップでスタート':'スペース / クリックでスタート', W/2, 526);
+}
+function renderIntro(){
+  ctx.textAlign='center';
+  ctx.fillStyle='#fff'; ctx.font='bold 24px "Segoe UI"'; ctx.fillText('SYSTEM LOG', W/2, 230);
+  const lines=['コロニー外壁、破断確認。','正体不明の群れ、接近中……','残存戦力―― あなたの機体のみ。','生存プロトコル起動：10:00'];
+  ctx.font='16px "Segoe UI"'; ctx.fillStyle='#9fe8c0';
+  lines.forEach((t,i)=>ctx.fillText(t, W/2, 290+i*34));
+  const blink=(clock()/500|0)%2===0; ctx.fillStyle=blink?'#ffe27a':'#667'; ctx.font='bold 20px "Segoe UI"';
+  ctx.fillText(IS_TOUCH?'タップで出撃':'スペース / クリックで出撃', W/2, 460);
+}
+
+function renderLevelUp(){
+  overlay(0.72);
+  ctx.textAlign='center';
+  ctx.save(); ctx.shadowColor='#ffe27a'; ctx.shadowBlur=18;
+  ctx.fillStyle='#ffe27a'; ctx.font='bold 34px "Segoe UI"';
+  ctx.fillText(G.chestPending?'🎁 宝箱オープン！':'LEVEL UP!', W/2, H/2-140);
+  ctx.restore();
+  ctx.fillStyle='#cde'; ctx.font='15px "Segoe UI"';
+  ctx.fillText(IS_TOUCH ? 'カードをタップして選ぶ'
+                        : '強化を選択（1 / 2 / 3 または クリック）'+(G.rerolls>0?'　E でリロール残'+G.rerolls:''), W/2, H/2-108);
+  for (let i=0;i<G.choices.length;i++){
+    const u=G.choices[i]; const r=cardRect(i);
+    ctx.fillStyle='#182046'; rrect(r.x,r.y,r.w,r.h,14); ctx.fill();
+    ctx.strokeStyle='#4dc3ff'; ctx.lineWidth=2; rrect(r.x,r.y,r.w,r.h,14); ctx.stroke();
+    ctx.fillStyle='#ffe27a'; ctx.font='46px "Segoe UI"'; ctx.fillText(u.icon, r.x+r.w/2, r.y+70);
+    ctx.fillStyle='#fff'; ctx.font='bold 17px "Segoe UI"'; ctx.fillText(u.name, r.x+r.w/2, r.y+112);
+    ctx.fillStyle='#bcd'; ctx.font='13px "Segoe UI"'; wrapText(u.desc, r.x+r.w/2, r.y+140, r.w-20, 17);
+    ctx.fillStyle='#4dc3ff'; ctx.font='bold 22px "Segoe UI"'; ctx.fillText((i+1)+'', r.x+r.w/2, r.y+r.h-20);
+  }
+  // v10：リロールを画面内ボタンに（キーボードの無い端末でも E 相当が押せる）
+  if (G.rerolls>0){ const b=btnReroll();
+    ctx.fillStyle='#12234a'; rrect(b.x,b.y,b.w,b.h,12); ctx.fill();
+    ctx.strokeStyle='#ffe27a'; ctx.lineWidth=2; rrect(b.x,b.y,b.w,b.h,12); ctx.stroke();
+    ctx.fillStyle='#ffe27a'; ctx.font='bold 16px "Segoe UI"'; ctx.textAlign='center';
+    ctx.fillText('🎲 引き直す 残'+G.rerolls+(IS_TOUCH?'':'（E）'), b.x+b.w/2, b.y+28); }
+}
+
+function wrapText(text,cx,y,maxw,lh){
+  const words=text.split(/(?<=[／/])|\s/); let line=''; let yy=y;
+  for (const w of words){ const test=line+w; if (ctx.measureText(test).width>maxw && line){ ctx.fillText(line,cx,yy); line=w; yy+=lh; } else line=test; }
+  if (line) ctx.fillText(line,cx,yy);
+}
+
+function renderWin(){
+  overlay(0.75);
+  ctx.textAlign='center';
+  ctx.save(); ctx.shadowColor='#ffe27a'; ctx.shadowBlur=26;
+  ctx.fillStyle='#ffe27a'; ctx.font='bold 52px "Segoe UI"'; ctx.fillText('生存クリア！', W/2, H/2-80);
+  ctx.restore();
+  ctx.fillStyle='#fff'; ctx.font='bold 24px "Segoe UI"'; ctx.fillText('10分間 生き延びた！', W/2, H/2-24);
+  ctx.fillStyle='#cde'; ctx.font='17px "Segoe UI"';
+  ctx.fillText('Lv '+G.level+'　撃破 '+G.kills+'　最大コンボ x'+G.maxCombo, W/2, H/2+14);
+  ctx.fillStyle='#9fe8c0'; ctx.font='14px "Segoe UI"';
+  ctx.fillText('警報が止む。ゲートの向こうに、味方の光が見える。　―― まだ、終わっていないけれど。', W/2, H/2+44);
+  const blink=(clock()/500|0)%2===0; ctx.fillStyle=blink?'#7dff9a':'#667'; ctx.font='bold 20px "Segoe UI"';
+  ctx.fillText(IS_TOUCH?'タップで無限モード続行':'クリックで無限モード続行 ／ R でリスタート', W/2, H/2+82);
+}
+
+function renderOver(){
+  overlay(0.72);
+  ctx.textAlign='center';
+  ctx.save(); ctx.shadowColor='#ff506e'; ctx.shadowBlur=20;
+  ctx.fillStyle='#ff8a9c'; ctx.font='bold 46px "Segoe UI"'; ctx.fillText('GAME OVER', W/2, H/2-70);
+  ctx.restore();
+  ctx.fillStyle='#8a97b0'; ctx.font='14px "Segoe UI"'; ctx.fillText('信号、途絶。', W/2, H/2-36);
+  ctx.fillStyle='#ffe27a'; ctx.font='bold 30px "Segoe UI"'; ctx.fillText('生存 '+fmtTime(G.time), W/2, H/2-10);
+  ctx.fillStyle='#cde'; ctx.font='17px "Segoe UI"'; ctx.fillText('Lv '+G.level+'　撃破 '+G.kills+'　最大コンボ x'+G.maxCombo+'　自己ベスト '+fmtTime(Store.get()*1000), W/2, H/2+26);
+  const nb = Math.floor(G.time/1000) >= Store.get();
+  if (nb){ ctx.fillStyle='#7CFC00'; ctx.font='bold 18px "Segoe UI"'; ctx.fillText('★ 自己ベスト更新！ ★', W/2, H/2+58); }
+  const blink=(clock()/500|0)%2===0; ctx.fillStyle=blink?'#ffe27a':'#667'; ctx.font='bold 22px "Segoe UI"';
+  ctx.fillText(IS_TOUCH?'タップで再挑戦':'スペース / クリックで再挑戦', W/2, H/2+112);
+}
+
+// ---- Input handler -------------------------------------------------------
+function onKey(code){
+  if (code==='KeyM'){ SFX.toggle(); Music.syncMute(); if (SFX.on) SFX.blip(); return; }   // 石坂v09：♪ON復帰の確認音
+  if (state==='levelup'){
+    if (code==='Digit1'||code==='Numpad1') chooseUpgrade(0);
+    else if (code==='Digit2'||code==='Numpad2') chooseUpgrade(1);
+    else if (code==='Digit3'||code==='Numpad3') chooseUpgrade(2);
+    else if (code==='KeyE') rerollChoices();
+    return;
+  }
+  if (state==='intro'){ if (code==='Space'||code==='Enter') confirmIntro(); return; }
+  if (code==='KeyR'){ startGame(); return; }
+  if (state==='title' || state==='over'){ if (code==='Space'||code==='Enter') startGame(); return; }
+  if (state==='win'){ if (code==='Space'||code==='Enter') goEndless(); return; }
+  if (code==='KeyP'){ if (state==='play'){ state='pause'; SFX.pause(); }                 // 石坂v09：止まる=下降/再開=上昇の出し分け
+                      else if (state==='pause'){ state='play'; SFX.resume(); } return; } // （従来はタイトルでPを押すとG無しでplayに入る事故もあった）
+}
+
+// ---- Win / lose ----------------------------------------------------------
+function winGame(){
+  G.won=true; state='win'; SFX.win(); FX.burst(G.x,G.y,'#ffe27a',40,6);
+  FX.ring(G.x,G.y,'#ffe27a',W*0.9,0.9,8); FX.flash('#ffe27a',0.4);   // 生存クリアの祝祭フラッシュ
+  if (!Music.active) SFX.startBGM('title');   // 勝利画面に静かな余韻BGM（従来は戦闘曲が鳴り続けていた）
+  const secs=Math.floor(G.time/1000);
+  if (secs>Store.get()) Store.set(secs);
+  // 累計スタッツはlose()側で確定加算（無限モード続行後の二重加算を避けるため）
+}
+// 石坂v09：無限モード続行＝踏み出す音を鳴らし、勝利画面の静かなBGMから戦闘曲へ戻す
+//           （従来は続行してもタイトル用アンビエントが鳴り続け、戦っているのに音が凪いでいた）
+function goEndless(){
+  G.endless=true; state='play'; SFX.endless();
+  if (!Music.active) SFX.startBGM('play');
+}
+function lose(){
+  state='over'; SFX.lose(); FX.shake(14); FX.burst(G.x,G.y,'#5aa6ff',24,5);
+  if (!Music.active) SFX.startBGM('title');   // 敗北後の結果画面に静かなBGM（従来は無音だった）
+  const secs=Math.floor(G.time/1000);
+  const isBest = secs>Store.get();
+  if (isBest) Store.set(secs);
+  if (isBest) setTimeout(()=>SFX.record(), 1000);   // 石坂v09：敗北ジングルが終わってから自己ベスト更新の叙勲（画面の★と音が一致）
+  LifeStats.add(G.kills, G.level);
+}
+
+// ---- Start / boot --------------------------------------------------------
+function startGame(){
+  if(!seenIntro){ state='intro'; SFX.sysBoot(); if (!Music.active) SFX.startBGM('title'); return; }   // 起動ログ画面＝端末が立ち上がる合図＋アンビエントBGM
+  FX.clear(); newGame(); state='play'; SFX.launch(); if (!Music.active) SFX.startBGM('play');         // 石坂v09：出撃の踏み込み音（従来はタイトルから無音で始まっていた）
+}
+function confirmIntro(){
+  seenIntro=true; try{ localStorage.setItem('neo_survivor_intro','1'); }catch(e){}
+  FX.clear(); newGame(); state='play'; SFX.launch(); if (!Music.active) SFX.startBGM('play');
+}
+
+// ---- カスタムBGM：🎵ボタンで音楽ファイル(MP3/WAV)を読込→ループ再生 --------
+//      （Suno等で生成した曲を使う。手順は cload_tmp\Suno\やり方.md 参照）
+const Music = {
+  audio: null,
+  get active(){ return !!this.audio; },
+  syncMute(){ if (this.audio) this.audio.muted = !SFX.on; },
+  load(file){
+    if (this.audio){ this.audio.pause(); try{ URL.revokeObjectURL(this.audio.src); }catch(e){} }
+    const a = new Audio(URL.createObjectURL(file));
+    a.loop = true; a.volume = 0.45; a.muted = !SFX.on;
+    this.audio = a;
+    SFX.stopBGM();                       // 内蔵チップチューンを停止して差し替え
+    a.play().catch(()=>{});
+    try{ document.getElementById('bgmName').textContent = '♪ ' + file.name + '（ループ再生中）'; }catch(e){}
+  },
+};
+document.getElementById('bgmBtn').addEventListener('click', ()=>{ SFX.ensure(); document.getElementById('bgmFile').click(); });
+document.getElementById('bgmFile').addEventListener('change', e=>{ const f=e.target.files[0]; if (f) Music.load(f); });
+
+// v10：説明行も端末で出し分け（キーの案内をスマホで読ませない）
+if (IS_TOUCH){ try{ document.getElementById('hint').textContent =
+  '画面をなぞって移動（指を置いた所がスティック）／ 攻撃は自動 ／ 強化はカードをタップ ／ ⏸ でポーズ'; }catch(e){} }
+
+state='title';
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

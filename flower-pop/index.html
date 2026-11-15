@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>フラワーポップ（スマホ対応）</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body{ height:100%; }
+  body { background:#0c1024; display:flex; flex-direction:column; align-items:center; justify-content:flex-start;
+         min-height:100vh; font-family:'Segoe UI','MS PGothic',sans-serif; touch-action:none; overflow:hidden;
+         padding:max(6px,env(safe-area-inset-top)) 6px max(6px,env(safe-area-inset-bottom)); }
+  canvas { display:block; box-shadow:0 0 36px rgba(120,150,255,0.3); border-radius:8px;
+           max-width:96vw; max-height:58vh; height:auto; image-rendering:auto; }
+  #hint { color:#8aa; font-size:11px; margin-top:6px; text-align:center; max-width:96vw; }
+  /* タッチ操作パッド */
+  #pad{ width:100%; max-width:440px; margin-top:10px; display:flex; flex-direction:column; gap:8px; align-items:center; user-select:none; }
+  #pad .row{ display:flex; gap:10px; justify-content:center; width:100%; }
+  .btn{ flex:1; min-width:0; height:62px; border-radius:14px; border:1px solid #2c3650; background:linear-gradient(#28304a,#1d2236);
+        color:#e6ebf5; font-size:24px; font-weight:700; display:flex; align-items:center; justify-content:center;
+        box-shadow:0 3px 0 #11151f; cursor:pointer; }
+  .btn:active{ transform:translateY(2px); box-shadow:0 1px 0 #11151f; background:linear-gradient(#39466c,#28304a); }
+  .btn small{ font-size:11px; font-weight:600; opacity:.7; margin-left:4px; }
+  .btn.rot{ background:linear-gradient(#3a2e5e,#2a2044); }
+  .btn.hard{ background:linear-gradient(#5e2e3a,#44202a); }
+  .btn.sys{ height:40px; font-size:14px; border-radius:10px; }
+  @media (min-height:760px){ canvas{ max-height:62vh; } .btn{ height:70px; } }
+</style>
+</head>
+<body>
+<canvas id="c" width="470" height="486"></canvas>
+<div id="pad">
+  <div class="row">
+    <div class="btn rot" id="bRotL">↺</div>
+    <div class="btn" id="bLeft">◀</div>
+    <div class="btn" id="bRight">▶</div>
+    <div class="btn rot" id="bRotR">↻</div>
+  </div>
+  <div class="row">
+    <div class="btn" id="bDown">▼<small>高速</small></div>
+    <div class="btn hard" id="bDrop">⤓<small>落とす</small></div>
+  </div>
+  <div class="row">
+    <div class="btn sys" id="bPause">⏸ ポーズ</div>
+    <div class="btn sys" id="bMute">🔊 音</div>
+    <div class="btn sys" id="bRestart">↺ 最初から</div>
+  </div>
+</div>
+<div id="hint">タッチ操作 ／ PCは ← → 移動・↓高速・Z/X回転・Space落とす ／ 画面タップでスタート</div>
+<script>
+'use strict';
+const C = document.getElementById('c'), ctx = C.getContext('2d');
+// ── 調整用定数 ───────────────────────────────────────────────
+const TS=32, COLS=6, ROWS=12, HIDDEN=2, FR=ROWS+HIDDEN;   // フィールド 6x12 + 隠し2行
+const COLORS_N=4;                                          // 使用色数（4 or 5）
+const SPAWN_COL=2;                                         // 組はな出現列
+const FX=24, FY=76;                                        // フィールド左上(px)
+const BASEFALL=800, MINFALL=120, SOFT_FALL=34;             // 落下間隔(ms)
+const LOCK_DELAY=450, MAX_RESET=10;                        // 接地猶予
+const DAS=160, ARR=40;                                     // 左右リピート
+const FLASH_MS=260;                                        // 消去フラッシュ
+const GARBAGE_ENABLED=true, GARBAGE_RATE=0.22;             // お邪魔（石ころ）※0.34→0.22に緩和
+const OJAMA=9;
+const DIRS=[[1,0],[-1,0],[0,1],[0,-1]];
+// 配点テーブル（連鎖ボーナス式）
+const CHAIN_POWER=[0,0,8,16,32,64,96,128,160,192,224,256,288,320,352,384,416,448,480,512];
+const COLOR_BONUS=[0,0,3,6,12,24];
+function groupBonus(n){ if(n<=4) return 0; if(n>=11) return 10; return [0,0,0,0,0,2,3,4,5,6,7][n]; }
+// 色パレット
+const PAL=[null,
+  {m:'#ff5d5d',l:'#ffd2d2',d:'#b8302a'},
+  {m:'#57d06a',l:'#cdf3d2',d:'#2e8b3d'},
+  {m:'#5aa6ff',l:'#cfe6ff',d:'#2b6fc0'},
+  {m:'#ffd24d',l:'#fff0c0',d:'#c79a18'},
+  {m:'#c879f0',l:'#eed4fb',d:'#8e3fc0'}];
+const OJ_COL={m:'#aeb6c0',l:'#e7ecf2',d:'#6c7480'};
+// ── 状態 ─────────────────────────────────────────────────────
+let field, cur, queue, score, hi, level, totalCleared, chain;
+let busy=false, state='title';
+let parts=[], flash=null, chainText=null;
+let shakeMag=0, scrFlash=null;          // 画面シェイク／全画面フラッシュ（D2演出）
+function shake(m){ if(m>shakeMag) shakeMag=m; }
+function screenFlash(col,a,dur){ scrFlash={col,a,born:clock(),dur:dur||0.4}; }
+let fallAcc=0, lockAcc=0, lockResets=0, ojamaAcc=0, fallInterval=BASEFALL;
+let softDrop=false, dasDir=0, dasTimer=0, dasCharged=false;
+let hardLand=false, wasDanger=false;     // 接地音の出し分け／危機に入った瞬間の警報（M4）
+let mode='endless', menuIdx=0, playMs=0, won=false;      // モード/タイトル選択/経過時間/勝利
+let enemy=null, bossIdx=0, pendingGarbage=0;             // ボス連戦
+hi = +(localStorage.getItem('puyo_hi')||0);
+let hiChain = +(localStorage.getItem('puyo_hichain')||0);      // 自己最大連鎖（永続記録）
+let bossClears = +(localStorage.getItem('puyo_bossclears')||0); // ボス連戦クリア回数（永続記録）
+let runMaxChain = 0;                                            // 今回のプレイでの最大連鎖
+let seenHowTo = (function(){ try{ return localStorage.getItem('flowerpop_howto')==='1'; }catch(e){ return false; } })();
+let pendingMode = null;         // ハウツー画面から戻る先のモード
+let bossToast = null;           // {text, born} ボス出現/撃退トースト
+function toast(text){ bossToast={text, born:clock()}; }
+const MODES=[{key:'endless',label:'ひとり（エンドレス）'},{key:'boss',label:'ボス連戦'}];
+const BOSSES=[                                            // 弱→強：魚→イノシシ→太陽
+  {name:'さかな',  hp:55,  atk:9000, gpa:2, fallMul:1.00, col:'#5ad0ff', draw:drawFish},
+  {name:'イノシシ',hp:100, atk:6500, gpa:3, fallMul:0.85, col:'#c89a6a', draw:drawBoar},
+  {name:'たいよう',hp:175, atk:4800, gpa:4, fallMul:0.70, col:'#ffcf3a', draw:drawSun},
+];
+const BOSS_TEXT=[                                         // 出現／撃破の一言（榊原千唐）
+  { enter:'小さな影が、川上からやってきた――さかな。',       clear:'さかなは静かに、水面へ還っていった。' },
+  { enter:'土煙をあげて、山からイノシシが暴れ込む。',       clear:'イノシシは鼻を鳴らし、山へと駆けもどっていった。' },
+  { enter:'空を焦がすように、たいようが花園に舞い降りる。', clear:null },
+];
+const clock=()=>performance.now();
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const inB=(r,c)=> r>=0&&r<FR&&c>=0&&c<COLS;
+const randPair=()=>[1+(Math.random()*COLORS_N|0),1+(Math.random()*COLORS_N|0)];
+// ── ピース操作 ───────────────────────────────────────────────
+function childCell(ax,ay,rot){ return rot===0?[ay-1,ax]: rot===1?[ay,ax+1]: rot===2?[ay+1,ax]: [ay,ax-1]; }
+function canPlace(ax,ay,rot){ const b=childCell(ax,ay,rot);
+  return inB(ay,ax)&&field[ay][ax]===0 && inB(b[0],b[1])&&field[b[0]][b[1]]===0; }
+function tryMove(d){ if(canPlace(cur.ax+d,cur.ay,cur.rot)){ cur.ax+=d; return true; } return false; }
+function tryDown(){ if(canPlace(cur.ax,cur.ay+1,cur.rot)){ cur.ay++; return true; } return false; }
+function tryRotate(dir){
+  const nrot=(cur.rot+dir+4)%4;
+  for(const [kx,ky] of [[0,0],[-1,0],[1,0],[0,-1],[1,-1],[-1,-1]])
+    if(canPlace(cur.ax+kx,cur.ay+ky,nrot)){ cur.ax+=kx; cur.ay+=ky; cur.rot=nrot; return true; }
+  if(cur.rot===0||cur.rot===2){ const flip=(cur.rot+2)%4;     // クイックターン
+    if(canPlace(cur.ax,cur.ay-1,flip)){ cur.ay-=1; cur.rot=flip; return true; }
+    if(canPlace(cur.ax,cur.ay,flip)){ cur.rot=flip; return true; } }
+  return false;
+}
+function placePiece(){ const b=childCell(cur.ax,cur.ay,cur.rot);
+  field[cur.ay][cur.ax]=cur.c1; field[b[0]][b[1]]=cur.c2; }
+function spawn(){
+  const p=queue.shift(); queue.push(randPair());
+  cur={ax:SPAWN_COL,ay:HIDDEN+1,rot:0,c1:p[0],c2:p[1]};
+  fallAcc=0; lockAcc=0; lockResets=0;
+  if(!canPlace(cur.ax,cur.ay,cur.rot)){ cur=null; return false; }
+  return true;
+}
+function resetLock(){ if(cur && !canPlace(cur.ax,cur.ay+1,cur.rot) && lockResets<MAX_RESET){ lockAcc=0; lockResets++; } }
+function doMove(d){ if(!cur) return; if(tryMove(d)){ Audio.move(); resetLock(); } else Audio.bump(); }      // 動けない時も音で返す（M4）
+function doRotate(d){ if(!cur) return; if(tryRotate(d)){ Audio.rotate(); resetLock(); } else Audio.bump(); }
+function hardDrop(){ if(!cur) return; while(canPlace(cur.ax,cur.ay+1,cur.rot)) cur.ay++; hardLand=true; shake(3.5); lockPiece(); }
+function lockPiece(){ placePiece(); if(hardLand){ Audio.drop(); hardLand=false; } else Audio.land(); cur=null; resolve(); }  // ドスンと コトッ を区別
+// ── 盤面処理（重力・連結・消去・連鎖）───────────────────────
+function applyGravity(){
+  for(let c=0;c<COLS;c++){ const st=[];
+    for(let r=FR-1;r>=0;r--){ if(field[r][c]!==0){ st.push(field[r][c]); field[r][c]=0; } }
+    let r=FR-1; for(const v of st){ field[r][c]=v; r--; } }
+}
+function findGroups(){
+  const seen=Array.from({length:FR},()=>Array(COLS).fill(false)); const groups=[];
+  for(let r=0;r<FR;r++)for(let c=0;c<COLS;c++){
+    const v=field[r][c]; if(v===0||v===OJAMA||seen[r][c]) continue;
+    const q=[[r,c]]; seen[r][c]=true; const g=[];
+    while(q.length){ const [cr,cc]=q.pop(); g.push([cr,cc]);
+      for(const [dr,dc] of DIRS){ const nr=cr+dr,nc=cc+dc;
+        if(inB(nr,nc)&&!seen[nr][nc]&&field[nr][nc]===v){ seen[nr][nc]=true; q.push([nr,nc]); } } }
+    if(g.length>=4) groups.push(g);
+  }
+  return groups;
+}
+async function resolve(){
+  busy=true; chain=0;
+  while(true){
+    applyGravity(); render();
+    const groups=findGroups();
+    if(groups.length===0) break;
+    chain++;
+    if(chain>runMaxChain) runMaxChain=chain;
+    const cells=[]; const colorSet=new Set(); let gBonus=0;
+    for(const g of groups){ gBonus+=groupBonus(g.length); colorSet.add(field[g[0][0]][g[0][1]]);
+      for(const rc of g) cells.push(rc); }
+    const oj=new Set();
+    for(const [r,c] of cells) for(const [dr,dc] of DIRS){ const nr=r+dr,nc=c+dc;
+      if(inB(nr,nc)&&field[nr][nc]===OJAMA) oj.add(nr+','+nc); }
+    const cleared=cells.length;
+    const mult=Math.max(1, CHAIN_POWER[Math.min(chain,19)] + gBonus + (COLOR_BONUS[colorSet.size]||0));
+    const gain=cleared*10*mult; score+=gain;
+    if(mode==='boss' && enemy && enemy.hp>0){            // 連鎖が大きいほど大ダメージ
+      enemy.hp=Math.max(0, enemy.hp - cleared*chain);
+      enemy.hitFlash=clock(); enemy.atkAcc=Math.max(0, enemy.atkAcc-1200);
+      shake(5); Audio.hit();                             // 敵ヒットの手応え（D2＋M4）
+    }
+    chainText={chain,gain,born:clock()};
+    flash={set:new Set([...cells.map(rc=>rc[0]+','+rc[1]),...oj]), born:clock()};
+    Audio.pop(chain);
+    if(oj.size) Audio.ojamaBreak();                       // お邪魔を巻き込んで割った音（M4）
+    // D2演出：消去は連鎖・消し数に応じてシェイク＋色フラッシュ、大連鎖は金の閃光
+    shake(3 + chain*2.2 + Math.min(7, cleared*0.5));
+    if(chain>=5){ screenFlash('#ffe27a', 0.34, 0.55); shake(12+chain); }
+    else { const fc=[...colorSet][0]||1; screenFlash(PAL[fc].m, 0.13, 0.30); }
+    if(chain>=5) Audio.chainBurst();                     // 大連鎖の節目に専用ジングル（M3）
+    await sleep(FLASH_MS);
+    for(const [r,c] of cells){ burstAt(c,r,PAL[field[r][c]].m); field[r][c]=0; }
+    for(const s of oj){ const [r,c]=s.split(',').map(Number); burstAt(c,r,OJ_COL.l); field[r][c]=0; }
+    flash=null; totalCleared+=cleared; updateLevel();
+    await sleep(110);
+  }
+  chainText=null;
+  if(mode==='boss'){ const drop=Math.min(pendingGarbage,COLS); if(drop>0){ dropOjama(drop); pendingGarbage-=drop; } }
+  else dropGarbage();
+  applyGravity(); render();
+  if(mode==='boss' && enemy && enemy.hp<=0){ advanceBoss(); }
+  if(state==='over'){ busy=false; return; }              // ボス全滅＝クリアで終了
+  if(!spawn()) gameOver();
+  busy=false;
+}
+function dropOjama(n){                                    // 空き列の最上段へ n 個
+  let put=0;
+  for(let i=0;i<n;i++){ const cands=[]; for(let c=0;c<COLS;c++) if(field[0][c]===0) cands.push(c);
+    if(!cands.length) break; field[0][cands[Math.random()*cands.length|0]]=OJAMA; put++; }
+  if(put) Audio.ojama(put);                               // 降ってきた数だけパラパラ鳴る（M4）
+}
+function dropGarbage(){
+  if(!GARBAGE_ENABLED || level<3) return;    // Lv1-2はお邪魔なしの猶予期間（初見殺し対策）
+  ojamaAcc += GARBAGE_RATE*(level-1);
+  let n=Math.min(COLS, Math.floor(ojamaAcc)); if(n<=0) return; ojamaAcc-=n; dropOjama(n);
+}
+function updateLevel(){ /* 落下速度・難度は update() で連続的に算出 */ }
+function setEnemy(i){ const b=BOSSES[i];
+  enemy={name:b.name,hp:b.hp,maxhp:b.hp,atk:b.atk,gpa:b.gpa,fallMul:b.fallMul,col:b.col,draw:b.draw,atkAcc:0,hitFlash:0,warn:0}; }
+function advanceBoss(){
+  Audio.win(); screenFlash('#fff2c0',0.4,0.6); shake(15); const beaten=bossIdx; bossIdx++;
+  if(bossIdx>=BOSSES.length){ bossClears++; try{localStorage.setItem('puyo_bossclears',bossClears);}catch(e){} winGame(); return; }  // 太陽まで倒したらクリア
+  setEnemy(bossIdx);
+  setTimeout(()=>Audio.bossIn(), 700);                   // 勝利ジングルの余韻のあと次の番人が現れる（M4）
+  toast(BOSS_TEXT[beaten].clear+'\n\n'+BOSS_TEXT[bossIdx].enter);
+  for(let r=0;r<FR;r++)for(let c=0;c<COLS;c++) if(field[r][c]===OJAMA && Math.random()<0.5){ burstAt(c,r,OJ_COL.l); field[r][c]=0; }  // ごほうび
+  applyGravity();
+}
+function winGame(){ won=true; state='over'; Audio.fanfare(); screenFlash('#ffd24d',0.5,0.9); shake(20);
+  if(score>hi){ hi=score; localStorage.setItem('puyo_hi',hi); }
+  if(runMaxChain>hiChain){ hiChain=runMaxChain; try{localStorage.setItem('puyo_hichain',hiChain);}catch(e){} } }
+function gameOver(){ won=false; state='over'; Audio.over(); screenFlash('#ff5d5d',0.45,0.8); shake(14);
+  if(score>hi){ hi=score; localStorage.setItem('puyo_hi',hi); }
+  if(runMaxChain>hiChain){ hiChain=runMaxChain; try{localStorage.setItem('puyo_hichain',hiChain);}catch(e){} } }
+// ── パーティクル ─────────────────────────────────────────────
+function burstAt(c,r,col){ const x=FX+c*TS+TS/2, y=FY+(r-HIDDEN)*TS+TS/2;
+  for(let i=0;i<11;i++){ const a=Math.random()*6.28, s=1.5+Math.random()*4.2;
+    parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-2,col,life:0,dur:0.45+Math.random()*0.35,r:2+Math.random()*2.6}); }
+  for(let i=0;i<3;i++){ const a=Math.random()*6.28, s=2.5+Math.random()*3;   // 白いきらめき
+    parts.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s-2.6,col:'#fff',life:0,dur:0.3+Math.random()*0.22,r:1.1+Math.random()*1.2,spark:true}); } }
+function updateParticles(dt){ const f=dt/16;
+  for(const p of parts){ p.life+=dt/1000; p.x+=p.vx*f; p.y+=p.vy*f; p.vy+=0.5*f; }
+  parts=parts.filter(p=>p.life<p.dur);
+  if(shakeMag>0){ shakeMag*=Math.pow(0.86,f); if(shakeMag<0.3) shakeMag=0; }   // シェイク減衰
+}
+// ── 描画 ─────────────────────────────────────────────────────
+function cellXY(r,c){ return [FX+c*TS+TS/2, FY+(r-HIDDEN)*TS+TS/2]; }
+function drawPuyo(cx,cy,R,idx,alpha,scale){
+  /* 花モチーフ描画（5枚の花びら＋黄色い花芯）。お邪魔は石ころ */
+  alpha=alpha==null?1:alpha; scale=scale==null?1:scale; const r=R*scale;
+  const P = idx===OJAMA?OJ_COL:PAL[idx];
+  ctx.save(); ctx.globalAlpha=alpha;
+  if(idx===OJAMA){
+    const g=ctx.createRadialGradient(cx-r*0.35,cy-r*0.4,r*0.2,cx,cy,r);
+    g.addColorStop(0,P.l); g.addColorStop(0.55,P.m); g.addColorStop(1,P.d);
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,r*0.92,0,6.2832); ctx.fill();
+    ctx.strokeStyle='rgba(0,0,0,0.3)'; ctx.lineWidth=1.5; ctx.stroke();
+    ctx.strokeStyle='rgba(0,0,0,0.45)'; ctx.lineWidth=1.6;
+    ctx.beginPath(); ctx.moveTo(cx-r*0.45,cy-r*0.05); ctx.lineTo(cx-r*0.05,cy+r*0.22);
+    ctx.moveTo(cx+r*0.12,cy-r*0.38); ctx.lineTo(cx+r*0.42,cy+r*0.05); ctx.stroke();
+    ctx.restore(); return;
+  }
+  for(let i=0;i<5;i++){
+    const a=-1.5708+i*1.2566;
+    const px=cx+Math.cos(a)*r*0.52, py=cy+Math.sin(a)*r*0.52;
+    const g=ctx.createRadialGradient(px-r*0.1,py-r*0.15,r*0.05,px,py,r*0.5);
+    g.addColorStop(0,P.l); g.addColorStop(0.6,P.m); g.addColorStop(1,P.d);
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(px,py,r*0.46,0,6.2832); ctx.fill();
+    ctx.strokeStyle='rgba(0,0,0,0.18)'; ctx.lineWidth=1; ctx.stroke();
+  }
+  const cg=ctx.createRadialGradient(cx-r*0.08,cy-r*0.1,r*0.04,cx,cy,r*0.34);
+  cg.addColorStop(0,'#fff4bc'); cg.addColorStop(1,'#e8b83a');
+  ctx.fillStyle=cg; ctx.beginPath(); ctx.arc(cx,cy,r*0.32,0,6.2832); ctx.fill();
+  ctx.strokeStyle='rgba(140,90,20,0.5)'; ctx.lineWidth=1; ctx.stroke();
+  ctx.restore();
+}
+function drawCell(r,c,idx,alpha,scale){ const [x,y]=cellXY(r,c); drawPuyo(x,y,TS*0.46,idx,alpha,scale); }
+// ── 背景＝夜の花園（D4 空間表現）────────────────────────────
+// 空・月・遠景の丘・手前の花のシルエット・舞う光の粒を層で重ね、場面（通常/ボス/危機）で空の色が変わる。
+// 配置は固定シードの擬似乱数で毎フレーム同じ＝ちらつきなし。
+const BGSTARS=[], BGMOTES=[], BGFLOWERS=[];
+(function(){ let s=20260722; const rnd=()=>((s=(s*1103515245+12345)&0x7fffffff)/0x7fffffff);
+  for(let i=0;i<52;i++) BGSTARS.push({x:rnd()*470, y:8+rnd()*300, r:0.5+rnd()*1.3, ph:rnd()*6.283});
+  for(let i=0;i<24;i++) BGMOTES.push({x:rnd()*470, y:rnd()*486, r:1+rnd()*2.2, sp:8+rnd()*22, am:6+rnd()*20, ph:rnd()*6.283});
+  for(let i=0;i<24;i++) BGFLOWERS.push({x:rnd()*476, y:436+rnd()*44, s:4.5+rnd()*6, c:1+(rnd()*4|0), ph:rnd()*6.283});
+})();
+function drawGarden(mood){
+  const t=clock()/1000, W=C.width, H=C.height;
+  // 空
+  const sky=ctx.createLinearGradient(0,-10,0,H+10);
+  if(mood==='pinch'){      sky.addColorStop(0,'#2c1030'); sky.addColorStop(0.55,'#1c0d26'); sky.addColorStop(1,'#140a18'); }
+  else if(mood==='boss'){  sky.addColorStop(0,'#1c1548'); sky.addColorStop(0.55,'#141034'); sky.addColorStop(1,'#0b0920'); }
+  else {                   sky.addColorStop(0,'#1a2358'); sky.addColorStop(0.55,'#121a3e'); sky.addColorStop(1,'#0b1024'); }
+  ctx.fillStyle=sky; ctx.fillRect(-10,-10,W+20,H+20);
+  // 星（ゆっくり瞬く）
+  for(const st of BGSTARS){ const a=0.25+0.55*Math.abs(Math.sin(t*0.7+st.ph));
+    ctx.globalAlpha=a; ctx.fillStyle='#dfe8ff'; ctx.beginPath(); ctx.arc(st.x,st.y,st.r,0,6.2832); ctx.fill(); }
+  ctx.globalAlpha=1;
+  // 月（危機のときは赤く曇る）
+  const mx=W-46, my=42, mr=21, moonCol = mood==='pinch' ? '#ffb2a0' : '#fff6d0';
+  const halo=ctx.createRadialGradient(mx,my,mr*0.4,mx,my,mr*3.4);
+  halo.addColorStop(0, mood==='pinch'?'rgba(255,150,120,0.30)':'rgba(255,244,200,0.22)');
+  halo.addColorStop(1,'rgba(255,244,200,0)');
+  ctx.fillStyle=halo; ctx.beginPath(); ctx.arc(mx,my,mr*3.4,0,6.2832); ctx.fill();
+  ctx.fillStyle=moonCol; ctx.beginPath(); ctx.arc(mx,my,mr,0,6.2832); ctx.fill();
+  ctx.globalAlpha=0.18; ctx.fillStyle='#c9b98a';
+  ctx.beginPath(); ctx.arc(mx-6,my-5,4.4,0,6.2832); ctx.arc(mx+7,my+3,3.2,0,6.2832); ctx.arc(mx-1,my+8,2.4,0,6.2832); ctx.fill();
+  ctx.globalAlpha=1;
+  // 遠景の丘（3層・奥ほど淡く）
+  const hill=(base,amp,freq,phase,col)=>{ ctx.fillStyle=col; ctx.beginPath(); ctx.moveTo(-10,H+10);
+    for(let x=-10;x<=W+10;x+=8) ctx.lineTo(x, base+Math.sin(x*freq+phase)*amp);
+    ctx.lineTo(W+10,H+10); ctx.closePath(); ctx.fill(); };
+  const tint = mood==='pinch' ? ['#2a1730','#1e1024','#150a18'] : mood==='boss' ? ['#211a46','#171232','#0f0b22'] : ['#1c2551','#141b3c','#0d1226'];
+  hill(392, 16, 0.013, 0.6, tint[0]);
+  hill(424, 12, 0.021, 2.4, tint[1]);
+  hill(452,  9, 0.031, 4.1, tint[2]);
+  // 手前の花のシルエット（風にゆれる）
+  for(const f of BGFLOWERS){
+    const sw=Math.sin(t*0.9+f.ph)*3.2, P=PAL[f.c];
+    ctx.globalAlpha=0.34;
+    ctx.strokeStyle='#0a1220'; ctx.lineWidth=1.6;
+    ctx.beginPath(); ctx.moveTo(f.x, f.y+f.s*3.4); ctx.quadraticCurveTo(f.x+sw*0.5, f.y+f.s*1.4, f.x+sw, f.y); ctx.stroke();
+    ctx.fillStyle=P.d;
+    for(let i=0;i<5;i++){ const a=-1.5708+i*1.2566;
+      ctx.beginPath(); ctx.arc(f.x+sw+Math.cos(a)*f.s*0.5, f.y+Math.sin(a)*f.s*0.5, f.s*0.42, 0, 6.2832); ctx.fill(); }
+    ctx.fillStyle=P.m; ctx.globalAlpha=0.28;
+    ctx.beginPath(); ctx.arc(f.x+sw, f.y, f.s*0.3, 0, 6.2832); ctx.fill();
+  }
+  ctx.globalAlpha=1;
+  // 舞う光の粒（花粉）
+  ctx.globalCompositeOperation='lighter';
+  for(const m of BGMOTES){
+    const y=(m.y - t*m.sp) % (H+40); const yy = y<-20 ? y+H+40 : y;
+    const x=m.x+Math.sin(t*0.5+m.ph)*m.am;
+    ctx.globalAlpha=0.10+0.16*Math.abs(Math.sin(t*1.3+m.ph));
+    ctx.fillStyle= mood==='pinch' ? '#ffc0a8' : '#ffe9a8';
+    ctx.beginPath(); ctx.arc(x,yy,m.r,0,6.2832); ctx.fill();
+  }
+  ctx.globalCompositeOperation='source-over'; ctx.globalAlpha=1;
+  // 危機のときは画面ふちが脈打つ（D2/D3の危険サイン）
+  if(mood==='pinch'){ const p=0.10+0.10*Math.abs(Math.sin(t*4));
+    const v=ctx.createRadialGradient(W/2,H/2,H*0.30,W/2,H/2,H*0.72);
+    v.addColorStop(0,'rgba(255,60,60,0)'); v.addColorStop(1,'rgba(255,50,50,'+p.toFixed(3)+')');
+    ctx.fillStyle=v; ctx.fillRect(-10,-10,W+20,H+20); }
+}
+function render(){
+  // 画面シェイク（D2）
+  let sx=0, sy=0;
+  if(shakeMag>0.3){ sx=(Math.random()-0.5)*shakeMag; sy=(Math.random()-0.5)*shakeMag; }
+  ctx.save(); ctx.translate(sx,sy);
+  // 背景（D4 空間表現：花園の情景。シェイクで端に隙間が出ないよう少し大きめに描く）
+  drawGarden(state!=='play' ? 'title' : (dangerNow() ? 'pinch' : ((mode==='boss'&&enemy) ? 'boss' : 'play')));
+  // タイトルヘッダ（背景が絵になったので影で可読性を確保）
+  ctx.save();
+  ctx.shadowColor='rgba(0,0,0,0.85)'; ctx.shadowBlur=8;
+  ctx.textAlign='left'; ctx.fillStyle='#ffe27a'; ctx.font='bold 26px "Segoe UI",sans-serif'; ctx.fillText('フラワーポップ', FX, 40);
+  ctx.fillStyle='#9aa8dd'; ctx.font='12px "Segoe UI"'; ctx.fillText('4色 / 4つ以上で消去 / 連鎖でスコアアップ', FX, 58);
+  ctx.restore();
+  if(state==='title'){ renderTitle(); ctx.restore(); return; }
+  if(state==='howto'){ renderHowTo(); ctx.restore(); return; }
+  // フィールド枠（背景が絵になったぶん、外周に淡いグローを敷いて盤面を浮かせる＝D3視認性）
+  { const gx=FX-3, gy=FY-3, gw=COLS*TS+6, gh=ROWS*TS+6;
+    const gl=ctx.createRadialGradient(gx+gw/2, gy+gh/2, gw*0.35, gx+gw/2, gy+gh/2, gh*0.72);
+    gl.addColorStop(0,'rgba(140,170,255,0.16)'); gl.addColorStop(1,'rgba(140,170,255,0)');
+    ctx.fillStyle=gl; ctx.fillRect(gx-40, gy-40, gw+80, gh+80); }
+  ctx.fillStyle='rgba(6,8,20,0.92)'; ctx.fillRect(FX-3,FY-3,COLS*TS+6,ROWS*TS+6);
+  ctx.strokeStyle='rgba(160,190,255,0.35)'; ctx.lineWidth=1; ctx.strokeRect(FX-3.5,FY-3.5,COLS*TS+7,ROWS*TS+7);
+  ctx.fillStyle='rgba(16,21,46,0.96)'; ctx.fillRect(FX,FY,COLS*TS,ROWS*TS);
+  ctx.strokeStyle='rgba(120,140,220,0.12)'; ctx.lineWidth=1;
+  for(let c=0;c<=COLS;c++){ ctx.beginPath(); ctx.moveTo(FX+c*TS,FY); ctx.lineTo(FX+c*TS,FY+ROWS*TS); ctx.stroke(); }
+  for(let r=0;r<=ROWS;r++){ ctx.beginPath(); ctx.moveTo(FX,FY+r*TS); ctx.lineTo(FX+COLS*TS,FY+r*TS); ctx.stroke(); }
+  // 危険マーク（出現列の最上段）
+  ctx.fillStyle='rgba(255,80,80,0.18)'; ctx.fillRect(FX+SPAWN_COL*TS,FY,TS,TS);
+  // 設置済みのはな
+  const fset = flash? flash.set : null;
+  for(let r=HIDDEN;r<FR;r++)for(let c=0;c<COLS;c++){ const v=field[r][c]; if(v===0) continue;
+    drawCell(r,c,v,1,1);
+    if(fset && fset.has(r+','+c)){ const [x,y]=cellXY(r,c); const a=0.4+0.6*Math.abs(Math.sin(clock()/60));
+      ctx.save(); ctx.globalAlpha=a; ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(x,y,TS*0.46,0,6.2832); ctx.fill(); ctx.restore(); } }
+  // ゴースト＆現在ピース
+  if(cur && !busy){
+    let gy=cur.ay; while(canPlace(cur.ax,gy+1,cur.rot)) gy++;
+    const gb=childCell(cur.ax,gy,cur.rot);
+    if(gy>=HIDDEN) drawCell(gy,cur.ax,cur.c1,0.22,1);
+    if(gb[0]>=HIDDEN) drawCell(gb[0],gb[1],cur.c2,0.22,1);
+    const b=childCell(cur.ax,cur.ay,cur.rot);
+    if(cur.ay>=HIDDEN) drawCell(cur.ay,cur.ax,cur.c1,1,1);
+    if(b[0]>=HIDDEN) drawCell(b[0],b[1],cur.c2,1,1);
+  }
+  // パーティクル
+  for(const p of parts){ ctx.save(); ctx.globalAlpha=Math.max(0,1-p.life/p.dur); ctx.fillStyle=p.col;
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r||3,0,6.2832); ctx.fill();
+    if(p.spark){ ctx.fillStyle='#fff'; ctx.fillRect(p.x-0.5,p.y-(p.r||1)*2.2,1,(p.r||1)*4.4); }  // 縦のきらめき光
+    ctx.restore(); }
+  // 連鎖カットイン
+  if(chainText){ const t=(clock()-chainText.born)/1000; const s=1+Math.min(0.6,t*3);
+    ctx.save(); ctx.globalAlpha=Math.max(0,1-t/1.1); ctx.textAlign='center';
+    const cx=FX+COLS*TS/2, cy=FY+ROWS*TS*0.4;
+    ctx.font=`bold ${22+chainText.chain*6}px "Segoe UI"`; ctx.fillStyle='#fff';
+    ctx.strokeStyle='#ff7ad0'; ctx.lineWidth=4;
+    if(chainText.chain>=2){ ctx.strokeText(chainText.chain+' 連鎖!!', cx, cy); ctx.fillText(chainText.chain+' 連鎖!!', cx, cy); }
+    ctx.font='bold 16px "Segoe UI"'; ctx.fillStyle='#ffe27a'; ctx.fillText('+'+chainText.gain, cx, cy+26);
+    ctx.restore(); }
+  // 右パネル
+  drawPanel();
+  if(state==='pause') overlay('PAUSE','#7ec8ff','Pキーで再開');
+  if(state==='over'){
+    if(won) overlay('🌞 クリア！ 🌞','#ffd24d','三体の番人は、光の道を思い出し、それぞれの季節へと帰っていった。\n花園に、静かな灯りが戻る――\n\nスペース / クリックでタイトルへ');
+    else overlay(mode==='boss'?'やられた…':'GAME OVER','#ff5d5d','スペース / クリックでタイトルへ');
+  }
+  // 全画面フラッシュ（D2・シェイクの座標系のまま最前面に重ねる）
+  if(scrFlash){ const t=(clock()-scrFlash.born)/1000;
+    if(t>=scrFlash.dur){ scrFlash=null; }
+    else { ctx.save(); ctx.globalAlpha=scrFlash.a*Math.max(0,1-t/scrFlash.dur);
+      ctx.fillStyle=scrFlash.col; ctx.fillRect(-sx-10,-sy-10,C.width+20,C.height+20); ctx.restore(); } }
+  ctx.restore();
+}
+// 敵キャラ（WebなしCanvas描画）。s=大きさ, hit=被弾フラッシュ, warn=攻撃予兆
+function drawFish(cx,cy,s,hit,warn){ const col=hit?'#ffffff':'#5ad0ff'; ctx.save();
+  ctx.fillStyle=col; ctx.beginPath(); ctx.moveTo(cx-s*0.85,cy); ctx.lineTo(cx-s*1.5,cy-s*0.55); ctx.lineTo(cx-s*1.5,cy+s*0.55); ctx.closePath(); ctx.fill();
+  const g=ctx.createRadialGradient(cx-s*0.3,cy-s*0.3,s*0.2,cx,cy,s); g.addColorStop(0,'#e7f7ff'); g.addColorStop(1,col);
+  ctx.fillStyle=g; ctx.beginPath(); ctx.ellipse(cx,cy,s,s*0.72,0,0,6.2832); ctx.fill(); ctx.strokeStyle='#2b6fa0'; ctx.lineWidth=2; ctx.stroke();
+  ctx.fillStyle=col; ctx.beginPath(); ctx.moveTo(cx-s*0.1,cy-s*0.6); ctx.lineTo(cx-s*0.3,cy-s*1.05); ctx.lineTo(cx+s*0.25,cy-s*0.6); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(cx+s*0.4,cy-s*0.13,s*0.2,0,6.2832); ctx.fill();
+  ctx.fillStyle='#222'; ctx.beginPath(); ctx.arc(cx+s*0.46,cy-s*0.11,s*0.1,0,6.2832); ctx.fill();
+  ctx.strokeStyle='#1a4a66'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(cx+s*0.72,cy+s*0.12,s*0.14, warn?0.1:0.3, warn?6.18:Math.PI-0.3); ctx.stroke(); ctx.restore(); }
+function drawBoar(cx,cy,s,hit,warn){ const col=hit?'#ffffff':'#9c7048'; ctx.save();
+  ctx.fillStyle=col; ctx.beginPath(); ctx.ellipse(cx+s*0.15,cy,s,s*0.72,0,0,6.2832); ctx.fill(); ctx.strokeStyle='#5a3f22'; ctx.lineWidth=2; ctx.stroke();
+  ctx.fillStyle=col; ctx.fillRect(cx-s*0.3,cy+s*0.55,s*0.2,s*0.45); ctx.fillRect(cx+s*0.5,cy+s*0.55,s*0.2,s*0.45);
+  ctx.fillStyle=col; ctx.beginPath(); ctx.arc(cx-s*0.7,cy+s*0.05,s*0.6,0,6.2832); ctx.fill(); ctx.stroke();
+  ctx.fillStyle='#5a3f22'; ctx.beginPath(); ctx.moveTo(cx-s*0.55,cy-s*0.45); ctx.lineTo(cx-s*0.3,cy-s*0.95); ctx.lineTo(cx-s*0.1,cy-s*0.45); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#c89a7a'; ctx.beginPath(); ctx.ellipse(cx-s*1.18,cy+s*0.2,s*0.26,s*0.2,0,0,6.2832); ctx.fill();
+  ctx.fillStyle='#3a2a18'; ctx.beginPath(); ctx.arc(cx-s*1.24,cy+s*0.2,s*0.05,0,6.2832); ctx.arc(cx-s*1.12,cy+s*0.2,s*0.05,0,6.2832); ctx.fill();
+  ctx.strokeStyle='#fff'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(cx-s*1.0,cy+s*0.42); ctx.lineTo(cx-s*1.15,cy+s*0.62);
+  ctx.moveTo(cx-s*0.9,cy+s*0.42); ctx.lineTo(cx-s*0.8,cy+s*0.64); ctx.stroke();
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(cx-s*0.6,cy-s*0.08,s*0.13,0,6.2832); ctx.fill();
+  ctx.fillStyle=warn?'#e33':'#222'; ctx.beginPath(); ctx.arc(cx-s*0.6,cy-s*0.05,s*0.07,0,6.2832); ctx.fill(); ctx.restore(); }
+function drawSun(cx,cy,s,hit,warn){ const col=hit?'#ffffff':'#ffcf3a'; ctx.save();
+  ctx.strokeStyle=warn?'#ff7a2a':'#ffd86a'; ctx.lineWidth=3;
+  for(let i=0;i<12;i++){ const a=i*Math.PI/6+clock()/2200; ctx.beginPath(); ctx.moveTo(cx+Math.cos(a)*s*1.15,cy+Math.sin(a)*s*1.15); ctx.lineTo(cx+Math.cos(a)*s*1.5,cy+Math.sin(a)*s*1.5); ctx.stroke(); }
+  const g=ctx.createRadialGradient(cx-s*0.3,cy-s*0.3,s*0.2,cx,cy,s); g.addColorStop(0,'#fff3b0'); g.addColorStop(1,col);
+  ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,s,0,6.2832); ctx.fill(); ctx.strokeStyle='#c79a18'; ctx.lineWidth=2; ctx.stroke();
+  ctx.fillStyle='#a8741a'; ctx.beginPath(); ctx.arc(cx-s*0.34,cy-s*0.1,s*0.12,0,6.2832); ctx.arc(cx+s*0.34,cy-s*0.1,s*0.12,0,6.2832); ctx.fill();
+  ctx.strokeStyle='#a8741a'; ctx.lineWidth=2.5; ctx.beginPath(); ctx.arc(cx,cy+s*0.18,s*0.42, warn?0:0.15, warn?6.28:Math.PI-0.15); ctx.stroke(); ctx.restore(); }
+function drawPanel(){
+  const px=FX+COLS*TS+22; ctx.textAlign='left';
+  if(mode==='boss' && enemy){
+    ctx.fillStyle='rgba(8,10,24,0.7)'; ctx.fillRect(px,FY-2,150,150);
+    ctx.textAlign='center'; ctx.fillStyle=enemy.col; ctx.font='bold 14px "Segoe UI"';
+    ctx.fillText('敵: '+enemy.name+' ('+(bossIdx+1)+'/'+BOSSES.length+')', px+75, FY+16);
+    const hit=enemy.hitFlash&&(clock()-enemy.hitFlash<150), warn=enemy.warn&&(clock()-enemy.warn<450);
+    ctx.save(); if(hit) ctx.translate((Math.random()-0.5)*4,(Math.random()-0.5)*4); enemy.draw(px+75,FY+80,30,hit,warn); ctx.restore();
+    const bw=130,bx=px+10,by=FY+126; ctx.fillStyle='#222'; ctx.fillRect(bx,by,bw,13);
+    const hpf=enemy.hp/enemy.maxhp; ctx.fillStyle=hpf>0.4?'#7CFC00':'#ff5d5d'; ctx.fillRect(bx,by,bw*hpf,13);
+    ctx.strokeStyle='#fff'; ctx.lineWidth=1; ctx.strokeRect(bx+0.5,by+0.5,bw-1,12);
+    ctx.fillStyle='#fff'; ctx.font='11px "Segoe UI"'; ctx.fillText('HP '+enemy.hp+' / '+enemy.maxhp, px+75, by+11);
+    // 攻撃タイマー可視化（予告なしの事故を防ぐ）
+    { const atkFrac=Math.max(0,Math.min(1, enemy.atkAcc/enemy.atk));
+      ctx.textAlign='center'; ctx.fillStyle='#7e8bbf'; ctx.font='10px "Segoe UI"'; ctx.fillText('つぎの攻撃', px+75, FY+146);
+      ctx.fillStyle='#222'; ctx.fillRect(px+10, FY+150, 130, 6);
+      ctx.fillStyle= atkFrac>0.8?'#ff5d5d':'#ffa64d'; ctx.fillRect(px+10, FY+150, 130*atkFrac, 6); }
+    ctx.textAlign='left'; ctx.fillStyle='#9fb0e8'; ctx.font='bold 13px "Segoe UI"'; ctx.fillText('NEXT', px, FY+164);
+    { const p=queue[0]; const byy=FY+174; ctx.fillStyle='rgba(8,10,24,0.7)'; ctx.fillRect(px,byy-6,66,72);
+      drawPuyo(px+30,byy+16,TS*0.4,p[1],1,1); drawPuyo(px+30,byy+46,TS*0.4,p[0],1,1); }
+    ctx.fillStyle='#7e8bbf'; ctx.font='12px "Segoe UI"'; ctx.fillText('SCORE', px+82, FY+182);
+    ctx.fillStyle='#ffe27a'; ctx.font='bold 20px "Segoe UI"'; ctx.fillText(String(score), px+82, FY+204);
+    ctx.fillStyle=Audio.on?'#7CFC00':'#888'; ctx.font='12px "Segoe UI"'; ctx.fillText((Audio.on?'♪ON':'♪OFF')+' (M)', px+82, FY+228);
+    drawBossToast(px);
+    return;
+  }
+  ctx.fillStyle='#9fb0e8'; ctx.font='bold 13px "Segoe UI"'; ctx.fillText('NEXT', px, FY+6);
+  const nb=(i)=>{ const p=queue[i]; const bx=px+8, by=FY+20+i*84;
+    ctx.fillStyle='rgba(8,10,24,0.7)'; ctx.fillRect(px,by-8,80,76);
+    drawPuyo(bx+24,by+18,TS*0.42,p[1],1,1); drawPuyo(bx+24,by+50,TS*0.42,p[0],1,1); };
+  nb(0); nb(1);
+  const sy=FY+208;
+  const line=(lbl,val,y,col)=>{ ctx.fillStyle='#7e8bbf'; ctx.font='12px "Segoe UI"'; ctx.fillText(lbl, px, y);
+    ctx.fillStyle=col||'#fff'; ctx.font='bold 22px "Segoe UI"'; ctx.fillText(val, px, y+24); };
+  line('SCORE', String(score), sy, '#ffe27a');
+  line('HI-SCORE', String(hi), sy+52, '#ffd24d');
+  line('LEVEL', String(level), sy+104, '#7ec8ff');
+  // 次のお邪魔までの目安（予告なしの事故を防ぐ）
+  if(GARBAGE_ENABLED && level>=3){
+    const frac=ojamaAcc-Math.floor(ojamaAcc);
+    ctx.fillStyle='#7e8bbf'; ctx.font='11px "Segoe UI"'; ctx.fillText('次のお邪魔まで', px, FY+352);
+    ctx.fillStyle='#222'; ctx.fillRect(px,FY+356,96,7);
+    ctx.fillStyle='#aeb6c0'; ctx.fillRect(px,FY+356,96*Math.max(0,Math.min(1,frac)),7);
+  }
+  ctx.fillStyle=Audio.on?'#7CFC00':'#888'; ctx.font='12px "Segoe UI"'; ctx.fillText((Audio.on?'♪ ON':'♪ OFF')+' (M)', px, FY+ROWS*TS+0);
+}
+function wrapCharText(text,cx,y,maxw,lh){
+  let line=''; let yy=y;
+  for(const ch of text){ const test=line+ch;
+    if(ctx.measureText(test).width>maxw && line){ ctx.fillText(line,cx,yy); line=ch; yy+=lh; } else line=test; }
+  if(line){ ctx.fillText(line,cx,yy); yy+=lh; }
+  return yy;
+}
+function drawBossToast(px){
+  if(!bossToast) return;
+  const t=(clock()-bossToast.born)/1000;
+  if(t>=3.4){ bossToast=null; return; }
+  const a=t<0.25?t/0.25:(t>2.8?Math.max(0,1-(t-2.8)/0.6):1);
+  ctx.save(); ctx.globalAlpha=a;
+  ctx.fillStyle='rgba(8,10,24,0.92)'; ctx.fillRect(px,FY-2,150,150);
+  ctx.fillStyle='#ffe27a'; ctx.font='bold 12px "Segoe UI"'; ctx.textAlign='center';
+  let yy=FY+20;
+  for(const para of bossToast.text.split('\n')){
+    if(!para){ yy+=8; continue; }
+    yy=wrapCharText(para, px+75, yy, 138, 16);
+  }
+  ctx.restore();
+}
+function renderTitle(){
+  ctx.textAlign='center'; const cx=C.width/2;
+  // 文字の下地（花園の絵が透けるうすい暗幕）＝キービジュアルを活かしつつ可読性を確保
+  { const g=ctx.createLinearGradient(0,70,0,C.height);
+    g.addColorStop(0,'rgba(6,9,22,0.00)'); g.addColorStop(0.22,'rgba(6,9,22,0.55)'); g.addColorStop(1,'rgba(6,9,22,0.72)');
+    ctx.fillStyle=g; ctx.fillRect(0,70,C.width,C.height-70); }
+  ctx.save(); ctx.shadowColor='rgba(255,180,90,0.85)'; ctx.shadowBlur=18;
+  ctx.fillStyle='#fff'; ctx.font='bold 38px "Segoe UI"'; ctx.fillText('フラワーポップ', cx, 110);
+  ctx.restore();
+  const demo=[1,2,3,4,2,1]; demo.forEach((d,i)=>drawPuyo(cx-90+i*36,150,13,d,1,1));
+  // モード選択
+  ctx.font='bold 20px "Segoe UI"';
+  MODES.forEach((m,i)=>{ const y=220+i*44;
+    if(i===menuIdx){ ctx.fillStyle='rgba(120,220,255,0.22)'; ctx.fillRect(cx-155,y-25,310,36); ctx.fillStyle='#ffe27a'; }
+    else ctx.fillStyle='#9bbace';
+    ctx.fillText((i===menuIdx?'▶ ':'   ')+m.label, cx, y); });
+  ctx.font='13px "Segoe UI"'; ctx.fillStyle='#bcd';
+  ctx.fillText('↑↓ で選択 ／ Space・クリックで決定', cx, 332);
+  ctx.fillText('ボス連戦：連鎖で敵を攻撃！ 魚→イノシシ→太陽 を倒せ', cx, 356);
+  ctx.fillText('← →移動  Z/X(↑)回転  ↓落下  Space一気落とし  P/M', cx, 380);
+  ctx.fillStyle='#6d7bb0'; ctx.font='12px "Segoe UI"';
+  ctx.fillText('ここは、灯り絶えた花園。四季の番人たちが、還る道を見失った。', cx, 400);
+  ctx.fillStyle='#8a97c8';
+  ctx.fillText('ハイスコア '+hi+' ／ 最大連鎖 '+hiChain+' ／ ボス撃破 '+bossClears+'回', cx, 418);
+  const blink=(clock()/500|0)%2===0;
+  ctx.fillStyle=blink?'#ffe27a':'#667'; ctx.font='bold 22px "Segoe UI"';
+  ctx.fillText('スタート', cx, 448);
+}
+function renderHowTo(){
+  ctx.textAlign='center'; const cx=C.width/2;
+  ctx.fillStyle='rgba(6,9,22,0.66)'; ctx.fillRect(0,70,C.width,C.height-70);
+  ctx.fillStyle='#fff'; ctx.font='bold 24px "Segoe UI"'; ctx.fillText('はじめに', cx, 128);
+  const lines=['花を4つ以上つなげると、光になって消える。','消した数だけ、まわりの花に灯りが移る――それが連鎖。','連鎖が続くほど、スコアも大きく跳ね上がる。'];
+  ctx.font='15px "Segoe UI"'; ctx.fillStyle='#cde';
+  lines.forEach((t,i)=>ctx.fillText(t, cx, 190+i*30));
+  const demo=[1,2,3,4]; demo.forEach((d,i)=>drawPuyo(cx-54+i*36,310,15,d,1,1));
+  const blink=(clock()/500|0)%2===0;
+  ctx.fillStyle=blink?'#ffe27a':'#667'; ctx.font='bold 20px "Segoe UI"';
+  ctx.fillText('タップ／クリックで、はじめよう', cx, 400);
+}
+function overlay(title,col,sub){
+  ctx.fillStyle='rgba(0,0,0,0.68)'; ctx.fillRect(0,0,C.width,C.height); ctx.textAlign='center';
+  ctx.fillStyle=col; ctx.font='bold 40px "Segoe UI"'; ctx.fillText(title, C.width/2, C.height/2-20);
+  if(state==='over'){ ctx.fillStyle='#fff'; ctx.font='18px "Segoe UI"'; ctx.fillText('SCORE '+score+'   HI '+hi, C.width/2, C.height/2+18); }
+  ctx.fillStyle='#aaa'; ctx.font='15px "Segoe UI"';
+  const baseY=C.height/2+52;
+  String(sub).split('\n').forEach((ln,i)=>ctx.fillText(ln, C.width/2, baseY+i*20));
+}
+// ── 更新ループ ───────────────────────────────────────────────
+function update(dt){
+  playMs+=dt;
+  if(mode==='boss' && enemy){
+    fallInterval=Math.max(MINFALL, BASEFALL*enemy.fallMul);
+    enemy.atkAcc+=dt;
+    if(enemy.atkAcc>=enemy.atk){ enemy.atkAcc=0; pendingGarbage+=enemy.gpa; enemy.warn=clock(); Audio.warn(); shake(4); screenFlash('#ff5d5d',0.10,0.3); }  // 敵の攻撃予告（D2）
+  } else {
+    const prog = totalCleared*0.7 + playMs/3500;          // 消去数＋時間で少しずつ加速
+    const nl = 1+Math.floor(prog/5);
+    if(nl>level) Audio.levelUp();                         // 花園が育った合図（M4）
+    level = nl;
+    fallInterval = Math.max(MINFALL, BASEFALL*Math.pow(0.955, prog));
+  }
+  if(!cur) return;
+  if(dasDir!==0){ dasTimer+=dt;
+    if(!dasCharged){ if(dasTimer>=DAS){ dasCharged=true; dasTimer=0; doMove(dasDir); } }
+    else if(dasTimer>=ARR){ dasTimer=0; doMove(dasDir); } }
+  const onGround=!canPlace(cur.ax,cur.ay+1,cur.rot);
+  if(onGround){ lockAcc+=dt; if(lockAcc>=LOCK_DELAY){ lockPiece(); return; } }
+  else { lockAcc=0; lockResets=0; fallAcc+=dt; const itv=softDrop?SOFT_FALL:fallInterval;
+    if(fallAcc>=itv){ fallAcc=0; tryDown(); } }
+}
+let lastT=0;
+// 危機(pinch)判定：積み上がった花が天井（可視域の最上段3行）に迫ったら true
+function dangerNow(){ if(state!=='play'||busy) return false;
+  for(let r=HIDDEN; r<=HIDDEN+2; r++){ const row=field[r]; if(!row) continue;
+    for(let c=0;c<COLS;c++){ if(row[c]) return true; } }
+  return false; }
+function loop(t){ const dt=lastT?Math.min(50,t-lastT):16; lastT=t;
+  if(state==='play'&&!busy) update(dt); updateParticles(dt); render();
+  const dg=dangerNow();
+  if(dg&&!wasDanger) Audio.danger();                     // 天井に迫った瞬間だけ一度鳴る警報（M4）
+  wasDanger=dg;
+  Audio.frame(state, mode, dg);                          // BGMの場面を毎フレーム同期（M2）
+  requestAnimationFrame(loop); }
+// ── 初期化・入力 ─────────────────────────────────────────────
+function init(){
+  field=Array.from({length:FR},()=>Array(COLS).fill(0));
+  queue=[randPair(),randPair(),randPair()];
+  score=0; level=1; totalCleared=0; chain=0; ojamaAcc=0; fallInterval=BASEFALL;
+  parts=[]; flash=null; chainText=null; busy=false; softDrop=false; dasDir=0;
+  playMs=0; won=false; pendingGarbage=0; runMaxChain=0; bossToast=null;
+  if(mode==='boss'){ bossIdx=0; setEnemy(0); setTimeout(()=>Audio.bossIn(),260); toast(BOSS_TEXT[0].enter); } else enemy=null;
+  hardLand=false; wasDanger=false;
+  spawn();
+}
+function start(m){
+  if(m) mode=m;
+  Audio.ensure(); Audio.confirm();                             // 決定音（M4）
+  if(!seenHowTo){ pendingMode=mode; state='howto'; return; }   // 初回だけ簡易ハウツーを挟む
+  init(); state='play'; Audio.setScene(mode==='boss'?'boss':'play'); Audio.startBGM();
+}
+function confirmHowTo(){
+  Audio.ensure(); Audio.confirm();                             // 決定音（M4）
+  seenHowTo=true; try{ localStorage.setItem('flowerpop_howto','1'); }catch(e){}
+  mode=pendingMode||mode; init(); state='play'; Audio.setScene(mode==='boss'?'boss':'play'); Audio.startBGM();
+}
+document.addEventListener('keydown', e=>{
+  Audio.ensure();
+  const k=e.code;
+  if(k==='KeyM'){ Audio.toggle(); e.preventDefault(); return; }
+  if(state==='howto'){ if(k==='Space'||k==='Enter') confirmHowTo(); e.preventDefault(); return; }
+  if(state==='title'){
+    if(k==='ArrowUp'||k==='ArrowLeft'){ menuIdx=(menuIdx+MODES.length-1)%MODES.length; Audio.cursor(); }
+    else if(k==='ArrowDown'||k==='ArrowRight'){ menuIdx=(menuIdx+1)%MODES.length; Audio.cursor(); }
+    else if(k==='Space'||k==='Enter'){ start(MODES[menuIdx].key); }
+    e.preventDefault(); return;
+  }
+  if(state==='over'){ if(k==='Space'||k==='Enter'){ state='title'; Audio.cursor(); } else if(k==='KeyR'){ start(mode); } e.preventDefault(); return; }
+  if(k==='KeyR'){ start(mode); e.preventDefault(); return; }
+  if(k==='KeyP'){ if(state==='play'||state==='pause'){ state = state==='play'?'pause':'play'; Audio.pauseSfx(state==='pause'); } e.preventDefault(); return; }
+  if(['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(k)) e.preventDefault();
+  if(state!=='play'||busy) return;
+  switch(k){
+    case 'ArrowLeft':  dasDir=-1; dasTimer=0; dasCharged=false; doMove(-1); break;
+    case 'ArrowRight': dasDir=1;  dasTimer=0; dasCharged=false; doMove(1);  break;
+    case 'ArrowDown':  softDrop=true; break;
+    case 'KeyZ': doRotate(-1); break;
+    case 'KeyX': case 'ArrowUp': doRotate(1); break;
+    case 'Space': hardDrop(); break;
+  }
+});
+document.addEventListener('keyup', e=>{
+  if(e.code==='ArrowDown') softDrop=false;
+  if(e.code==='ArrowLeft'  && dasDir===-1) dasDir=0;
+  if(e.code==='ArrowRight' && dasDir=== 1) dasDir=0;
+});
+C.addEventListener('click', ()=>{ Audio.ensure();
+  if(state==='howto') confirmHowTo();
+  else if(state==='title') start(MODES[menuIdx].key);
+  else if(state==='over'){ state='title'; Audio.cursor(); } });
+// ── サウンド（WebAudio・ファイル不要）────────────────────────
+const Audio=(function(){
+  let ac=null,master=null,on=true,iv=null,step=0,intense=false,scene='play';
+  const midi=n=>440*Math.pow(2,(n-69)/12);
+  function tone(f,d,t,v){ if(!ac)return; const o=ac.createOscillator(),g=ac.createGain(),now=ac.currentTime+0.01;
+    o.type=t; o.frequency.value=f; g.gain.setValueAtTime(0,now); g.gain.linearRampToValueAtTime(v,now+0.012);
+    g.gain.exponentialRampToValueAtTime(0.0006,now+d); o.connect(g).connect(master); o.start(now); o.stop(now+d+0.03); }
+  function nz(v,fr,d,q){ if(!ac)return; const b=ac.createBuffer(1,1024,ac.sampleRate),dt=b.getChannelData(0);
+    for(let i=0;i<dt.length;i++)dt[i]=Math.random()*2-1; const s=ac.createBufferSource(); s.buffer=b;
+    const f=ac.createBiquadFilter(); f.type='bandpass'; f.frequency.value=fr; if(q)f.Q.value=q; const g=ac.createGain();
+    g.gain.setValueAtTime(v,ac.currentTime+0.01); g.gain.exponentialRampToValueAtTime(0.001,ac.currentTime+0.01+d);
+    s.connect(f).connect(g).connect(master); s.start(); s.stop(ac.currentTime+0.05+d); }
+  function kick(v){ if(!ac)return; const o=ac.createOscillator(),g=ac.createGain(),now=ac.currentTime+0.01;
+    o.frequency.setValueAtTime(150,now); o.frequency.exponentialRampToValueAtTime(50,now+0.1);
+    g.gain.setValueAtTime(v,now); g.gain.exponentialRampToValueAtTime(0.001,now+0.12); o.connect(g).connect(master); o.start(now); o.stop(now+0.14); }
+  // ── 場面別トラック（M2 場面別切替）：タイトル／通常／ボス／危機で曲そのものが変わる ──
+  //  0 は休符。scene ごとにテンポ(1/16のms)・調・厚みが変化する。
+  const TR = {
+    // 通常プレイ：明るい花園の多層ループ（従来曲を踏襲）
+    play:{ tempo:150, style:'bright',
+      BASS:[33,33,40,33, 38,38,40,41, 33,33,40,33, 36,38,40,40],
+      LEAD:[72,76,79,76, 74,71,67,71, 72,76,81,79, 77,76,74,72],
+      ARP :[60,64,67,72, 62,65,69,72, 60,64,67,72, 65,69,72,76],
+      CH:[[48,52,55],[48,52,55],[50,53,57],[53,57,60]] },
+    // タイトル／結果画面：灯り絶えた花園の物悲しく静かなアンビエント（従来は無音だった）
+    title:{ tempo:240, style:'ambient',
+      BASS:[33,0,0,0, 31,0,0,0, 29,0,0,0, 31,0,0,0],
+      LEAD:[0,0,76,0, 0,0,74,0, 0,0,72,0, 0,0,71,0],
+      ARP :[0,64,0,67, 0,62,0,65, 0,60,0,64, 0,59,0,62],
+      CH:[[48,51,55],[47,50,53],[45,48,52],[47,50,53]] },
+    // ボス戦：短調で駆り立てる重いリフ（従来は通常曲＋厚み層だけだった → 別曲に）
+    boss:{ tempo:128, style:'heavy',
+      BASS:[28,28,35,28, 28,29,28,26, 28,28,35,28, 31,30,29,28],
+      LEAD:[64,67,70,67, 63,67,70,72, 64,67,70,74, 75,74,72,70],
+      ARP :[52,55,59,64, 51,55,58,63, 52,55,59,64, 55,58,63,67],
+      CH:[[40,43,47],[40,43,47],[39,42,46],[41,44,48]] },
+    // 危機：盤面が天井に迫るとにじり寄る半音進行の緊迫曲（新設）
+    pinch:{ tempo:108, style:'tense',
+      BASS:[36,36,37,36, 35,35,36,35, 36,36,37,36, 38,37,36,35],
+      LEAD:[72,73,72,71, 72,73,74,73, 72,73,72,71, 75,74,73,72],
+      ARP :[60,61,60,63, 60,61,62,61, 60,61,60,63, 64,63,62,61],
+      CH:[[48,51,54],[49,52,55],[48,51,54],[50,53,56]] },
+  };
+  function tick(){ if(!ac)return; const T=TR[scene]||TR.play, amb=T.style==='ambient', ch=T.CH[(step>>2)&3];
+    if(T.BASS[step]) tone(midi(T.BASS[step]),amb?0.5:0.20,'triangle',amb?0.10:0.16);            // ベース
+    if(step%4===0) ch.forEach(n=>tone(midi(n),amb?0.9:0.5,'sawtooth',amb?0.020:0.026));         // コードパッド（持続）
+    if(T.ARP[step]) tone(midi(T.ARP[step]),0.10,'triangle',amb?0.030:0.045);                    // アルペジオ
+    if(step%2===0 && T.LEAD[step]) tone(midi(T.LEAD[step]),0.16,'square',amb?0.035:0.055);      // リード
+    if(!amb){                                                                                   // アンビエントはドラム抜き
+      if(step%4===0) kick(0.5);                                                                 // キック
+      if(step%8===4) nz(0.18,2000,0.12,1.2);                                                    // スネア
+      nz(0.045,8000,0.025);                                                                     // ハイハット
+    }
+    if(T.style==='heavy'||T.style==='tense'){ tone(midi(T.BASS[step]+12),0.08,'square',0.033); if(step%2===0) kick(0.42); }  // ボス/危機は厚く速い刻み
+    step=(step+1)%16; }
+  return {
+    get on(){return on;},
+    ensure(){ try{ if(!ac){ const A=window.AudioContext||window.webkitAudioContext; if(!A)return;
+      ac=new A(); master=ac.createGain(); master.gain.value=on?0.2:0; master.connect(ac.destination);} if(ac.state==='suspended')ac.resume(); }catch(e){} },
+    startBGM(){ this.ensure(); if(ac&&!iv){ step=0; iv=setInterval(tick,(TR[scene]||TR.play).tempo); } },
+    setIntense(b){ intense=!!b; },                                  // 後方互換（scene は frame() が駆動）
+    // 場面を切り替える。テンポが変わる曲へは step を保ったまま鳴らし直す（流れは切らない）
+    setScene(s){ if(!TR[s]||s===scene)return; scene=s; if(iv){ clearInterval(iv); iv=setInterval(tick,TR[s].tempo); } },
+    // 毎フレーム、ゲーム状態から鳴らすべき曲を決める。優先度 危機>ボス>通常、非プレイ時はタイトルの静曲
+    frame(st,md,danger){ if(!ac||!on)return; if(!iv&&st!=='play')return;   // 未解錠 or プレイ前は鳴らさない
+      let s = (st==='play') ? (danger?'pinch':(md==='boss'?'boss':'play')) : 'title';
+      if(!iv){ iv=setInterval(tick,TR[s].tempo); } this.setScene(s); },
+    toggle(){ on=!on; if(master)master.gain.value=on?0.2:0; if(on) this.cursor(); },   // ONに戻した時だけ確認音
+    move(){ tone(330*(0.985+Math.random()*0.03),0.05,'square',0.05); },   // 連打しても機械的に聞こえないよう微ゆらぎ
+    rotate(){ tone(540*(0.985+Math.random()*0.03),0.05,'square',0.05); },
+    drop(){ tone(150,0.09,'square',0.09); nz(0.1,500,0.06); },
+    // ── M4 効果音レイヤー（2026-07-26 石坂）：全アクションに音を付ける ──
+    // すべて既存の tone/nz/kick を経由＝master(0.20)配下なので ♪OFF と全ゲーム共通の音量基準を維持する
+    land(){ if(!ac)return; tone(196,0.06,'triangle',0.07); nz(0.07,900,0.05,1.4); },          // 通常接地：コトッ（ハードドロップのドスンと区別）
+    bump(){ if(!ac)return; tone(110,0.05,'square',0.045); nz(0.05,260,0.045,2.0); },           // 壁・他の花にぶつかって動けない
+    cursor(){ if(!ac)return; tone(660,0.04,'square',0.05); },                                  // メニューのカーソル移動
+    confirm(){ if(!ac)return; [0,70].forEach((d,i)=>setTimeout(()=>{ if(!ac)return;
+      tone(midi(72+i*7),0.12,'square',0.08); tone(midi(60+i*7),0.10,'triangle',0.05); }, d)); },// 決定（スタート／ハウツー確定）
+    ojama(n){ if(!ac)return; const k=Math.min(6,n);                                            // お邪魔が降ってくる：数だけパラパラ落ちる
+      for(let i=0;i<k;i++) setTimeout(()=>{ if(!ac)return;
+        tone(300-i*14+Math.random()*30,0.07,'triangle',0.055); nz(0.06,1200,0.04,1.6); }, i*38); },
+    ojamaBreak(){ if(!ac)return; nz(0.14,3400,0.10,0.8); tone(880,0.07,'triangle',0.05); },     // お邪魔を巻き込んで割った：シャリン
+    hit(){ if(!ac)return; kick(0.34); nz(0.10,1500,0.07,1.1); tone(240,0.07,'sawtooth',0.05); },// ボスに連鎖が刺さった
+    bossIn(){ if(!ac)return; [0,120,240].forEach((d,i)=>setTimeout(()=>{ if(!ac)return;
+      tone(midi(45-i*2),0.30,'sawtooth',0.10); kick(0.42); }, d));
+      setTimeout(()=>{ if(!ac)return; nz(0.14,700,0.35,0.7); }, 240); },                        // 番人の登場：三連の低音とうねり
+    levelUp(){ if(!ac)return; [67,72,76].forEach((n,i)=>setTimeout(()=>{ if(!ac)return;
+      tone(midi(n),0.13,'square',0.08); tone(midi(n+12),0.10,'triangle',0.04); }, i*60)); },    // 花園が育つ（レベルアップ）
+    danger(){ if(!ac)return; [0,150].forEach(d=>setTimeout(()=>{ if(!ac)return;
+      tone(midi(70),0.14,'sawtooth',0.09); tone(midi(65),0.14,'sawtooth',0.07); }, d)); },      // 天井が迫った瞬間の一度きりの警報
+    pauseSfx(p){ if(!ac)return; const ns=p?[72,64]:[64,72];                                     // ポーズ／再開
+      ns.forEach((n,i)=>setTimeout(()=>{ if(!ac)return; tone(midi(n),0.10,'square',0.06); }, i*70)); },
+    pop(ch){ const base=520*Math.pow(1.12,ch-1); tone(base,0.12,'square',0.09); tone(base*1.5,0.1,'triangle',0.05); nz(0.14,2600,0.06); },
+    warn(){ tone(196,0.12,'sawtooth',0.07); nz(0.08,300,0.1); },
+    win(){ const mel=[60,64,67,72];                                      // 二声化(オクターブ下ハモり)＋フィナーレ和音
+      mel.forEach((m,i)=>setTimeout(()=>{ if(!ac)return; tone(midi(m),0.18,'square',0.12); tone(midi(m-12),0.16,'triangle',0.06); }, i*90));
+      setTimeout(()=>{ if(!ac)return; [72,76,79].forEach(n=>tone(midi(n),0.35,'square',0.09)); }, mel.length*90+40); },
+    fanfare(){ const mel=[60,64,67,72,76,79,84];                         // 二声化＋きらめきSE＋フィナーレ和音で拡張
+      mel.forEach((m,i)=>setTimeout(()=>{ if(!ac)return; tone(midi(m),0.3,'square',0.13); tone(midi(m-12),0.26,'triangle',0.06); }, i*120));
+      setTimeout(()=>{ if(!ac)return; [72,76,79,84].forEach(n=>tone(midi(n),0.6,'square',0.1)); nz(0.12,6000,0.3); }, mel.length*120+80); },
+    over(){ [0,1,2,3].forEach(i=>{ if(!ac)return; setTimeout(()=>tone(midi(64-i*3),0.25,'sawtooth',0.12), i*140); });
+      setTimeout(()=>{ if(!ac)return; [40,43,47].forEach(n=>tone(midi(n),0.9,'sine',0.05)); }, 4*140); },  // 低音サステイン和音で重みを付与
+    chainBurst(){ if(!ac)return; const notes=[72,76,79,84,88];           // 大連鎖(5+)専用ジングル
+      notes.forEach((n,i)=>setTimeout(()=>{ if(!ac)return; tone(midi(n),0.14,'square',0.1); tone(midi(n-12),0.12,'triangle',0.05); }, i*45));
+      nz(0.16,5000,0.15); },
+  };
+})();
+// ── 開始 ─────────────────────────────────────────────────────
+state='title';
+requestAnimationFrame(loop);
+
+// ── タッチ操作（スマホ） ──────────────────────────────────────
+(function(){
+  const $=id=>document.getElementById(id);
+  const playing=()=> state==='play' && !busy;
+  function press(el, onDown, onUp){
+    if(!el) return;
+    el.addEventListener('pointerdown', e=>{ e.preventDefault(); Audio.ensure(); onDown && onDown(); });
+    if(onUp){ el.addEventListener('pointerup', e=>{ e.preventDefault(); onUp(); });
+              el.addEventListener('pointercancel', ()=>onUp());
+              el.addEventListener('pointerleave', e=>{ if(e.buttons) onUp(); }); }
+    el.addEventListener('contextmenu', e=>e.preventDefault());
+  }
+  // 左
+  press($('bLeft'), ()=>{ if(state==='title'){ menuIdx=(menuIdx+MODES.length-1)%MODES.length; Audio.cursor(); return; }
+    if(!playing()) return; dasDir=-1; dasTimer=0; dasCharged=false; doMove(-1); },
+    ()=>{ if(dasDir===-1) dasDir=0; });
+  // 右
+  press($('bRight'), ()=>{ if(state==='title'){ menuIdx=(menuIdx+1)%MODES.length; Audio.cursor(); return; }
+    if(!playing()) return; dasDir=1; dasTimer=0; dasCharged=false; doMove(1); },
+    ()=>{ if(dasDir===1) dasDir=0; });
+  // 回転
+  press($('bRotL'), ()=>{ if(playing()) doRotate(-1); });
+  press($('bRotR'), ()=>{ if(playing()) doRotate(1); });
+  // 高速落下（押している間）
+  press($('bDown'), ()=>{ if(playing()) softDrop=true; }, ()=>{ softDrop=false; });
+  // 落とす／決定
+  press($('bDrop'), ()=>{
+    if(state==='howto'){ confirmHowTo(); return; }
+    if(state==='title'){ start(MODES[menuIdx].key); return; }
+    if(state==='over'){ state='title'; Audio.cursor(); return; }
+    if(playing()) hardDrop();
+  });
+  // システム
+  press($('bPause'), ()=>{ if(state==='play'||state==='pause'){ state = state==='play'?'pause':'play'; Audio.pauseSfx(state==='pause'); } });
+  press($('bMute'),  ()=>{ Audio.toggle(); });
+  press($('bRestart'), ()=>{ if(state!=='title') start(mode); });
+})();
+</script>
+</body>
+</html>
