@@ -879,24 +879,91 @@ function header(title,sub){
   txt(title,24,44,'#fff','bold 30px "Segoe UI"');
   if(sub) txt(sub,24,70,'#e9f2ff','15px "Segoe UI"');
 }
-function renderTitle(){
-  drawScene(clock()*0.012,HORIZON+60,clock()/1000);
-  ctx.save(); ctx.textAlign='center';
-  ctx.fillStyle='rgba(8,16,30,0.42)'; rrect(W/2-300,86,600,180,18); ctx.fill();
-  ctx.lineWidth=6; ctx.strokeStyle='#1b2740'; ctx.fillStyle='#ffe27a';
-  ctx.font='bold 62px "Segoe UI"'; ctx.strokeText('恐竜スタリオン',W/2,168); ctx.fillText('恐竜スタリオン',W/2,168);
-  ctx.fillStyle='#eaf3ff'; ctx.font='19px "Segoe UI"';
-  ctx.fillText('白亜紀の牧場で育て、草原のレースで競う',W/2,212);
-  ctx.fillStyle='#cfe0f5'; ctx.font='14px "Segoe UI"'; ctx.fillText('v11（開発中）',W/2,242);
+// v12：タイトル画面を作り直し（灰色の箱をやめて、金と緑のふちどりロゴ・英字の見出し・緑のリボン・光る「はじめる」）
+// ロゴ：1文字ずつ飛びこむ。濃い緑のふち＋細い明るいふち＋金のたてグラデーション＋金の光
+function titleLogo(text,cx,y,size,t){
+  ctx.save(); ctx.textAlign='center'; ctx.textBaseline='alphabetic'; ctx.lineJoin='round';
+  ctx.font='900 '+size+'px "Yu Gothic UI","Hiragino Sans","Meiryo","Segoe UI",sans-serif';
+  const chars=[...text], ws=chars.map(ch=>ctx.measureText(ch).width), total=ws.reduce((p,q)=>p+q,0);
+  let x=cx-total/2;
+  chars.forEach((ch,i)=>{
+    const e=clamp((t-0.15-i*0.07)/0.45,0,1);
+    const back=1+2.70158*Math.pow(e-1,3)+1.70158*Math.pow(e-1,2);
+    const bob=Math.sin(t*2.0-i*0.5)*2.5*e;
+    ctx.save(); ctx.translate(x+ws[i]/2, y+bob-(1-e)*46); ctx.scale(back,back); ctx.globalAlpha=e;
+    ctx.strokeStyle='#04180a'; ctx.lineWidth=size*0.2; ctx.strokeText(ch,0,6);            // 下にずらした影で厚みを出す
+    ctx.shadowColor='rgba(255,214,90,0.9)'; ctx.shadowBlur=26;
+    ctx.strokeStyle='#0d3a1a'; ctx.lineWidth=size*0.2; ctx.strokeText(ch,0,0);
+    ctx.shadowBlur=0;
+    ctx.strokeStyle='#fff6cf'; ctx.lineWidth=size*0.075; ctx.strokeText(ch,0,0);
+    const g=ctx.createLinearGradient(0,-size*0.9,0,size*0.12);
+    g.addColorStop(0,'#fffbe0'); g.addColorStop(0.4,'#ffe066'); g.addColorStop(0.72,'#f5a623'); g.addColorStop(1,'#b8650d');
+    ctx.fillStyle=g; ctx.fillText(ch,0,0);
+    ctx.restore(); x+=ws[i]; });
   ctx.restore();
+}
+// 両はしに切れこみのある緑のリボン（ひとことの下地）
+function titleRibbon(cx,y,w,h){
+  const n=14, g=ctx.createLinearGradient(0,y,0,y+h);
+  g.addColorStop(0,'#2f8a45'); g.addColorStop(1,'#14532a');
+  ctx.save(); ctx.shadowColor='rgba(0,0,0,0.45)'; ctx.shadowBlur=10; ctx.shadowOffsetY=3;
+  ctx.beginPath(); ctx.moveTo(cx-w/2,y); ctx.lineTo(cx+w/2,y); ctx.lineTo(cx+w/2-n,y+h/2); ctx.lineTo(cx+w/2,y+h);
+  ctx.lineTo(cx-w/2,y+h); ctx.lineTo(cx-w/2+n,y+h/2); ctx.closePath();
+  ctx.fillStyle=g; ctx.fill();
+  ctx.shadowColor='rgba(0,0,0,0)'; ctx.shadowBlur=0; ctx.shadowOffsetY=0;
+  ctx.lineWidth=2; ctx.strokeStyle='#f3cf6a'; ctx.stroke();
+  ctx.restore();
+}
+function renderTitle(){
+  const t=clock()/1000, cx=W/2;
+  drawScene(clock()*0.012,HORIZON+60,t);
+  ctx.save(); ctx.textAlign='center';
+  // 上のほうを少し暗くして、題字のうしろに金の光を置く
+  { const g=ctx.createLinearGradient(0,0,0,300);
+    g.addColorStop(0,'rgba(6,20,14,0.62)'); g.addColorStop(0.7,'rgba(6,20,14,0.22)'); g.addColorStop(1,'rgba(6,20,14,0)');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,300); }
+  { const g=ctx.createRadialGradient(cx,140,10,cx,140,330);
+    g.addColorStop(0,'rgba(255,226,130,0.34)'); g.addColorStop(1,'rgba(255,226,130,0)');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,330); }
+  // 英字の小見出し
+  ctx.globalAlpha=clamp(t/0.5,0,1);
+  ctx.font='bold 15px "Segoe UI",sans-serif'; ctx.fillStyle='#ffe9a8';
+  ctx.shadowColor='rgba(0,0,0,0.7)'; ctx.shadowBlur=6;
+  { const s='DINO STALLION', step=17; [...s].forEach((ch,i)=>ctx.fillText(ch, cx-(s.length-1)*step/2+i*step, 62)); }
+  ctx.shadowColor='rgba(0,0,0,0)'; ctx.shadowBlur=0;
+  ctx.strokeStyle='rgba(255,233,168,0.75)'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(cx-250,57); ctx.lineTo(cx-128,57); ctx.moveTo(cx+128,57); ctx.lineTo(cx+250,57); ctx.stroke();
+  ctx.restore();
+  // ロゴ
+  titleLogo('恐竜スタリオン',cx,158,84,t);
+  // ひとこと（リボンの上）と版の番号
+  ctx.save(); ctx.textAlign='center'; ctx.globalAlpha=clamp((t-0.75)/0.4,0,1);
+  titleRibbon(cx,187,470,36);
+  ctx.fillStyle='#fff8dc'; ctx.font='bold 19px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif';
+  ctx.fillText('白亜紀の牧場で育て、草原のレースで競う',cx,212);
+  ctx.shadowColor='rgba(0,0,0,0.75)'; ctx.shadowBlur=5;
+  ctx.fillStyle='#eaf3ff'; ctx.font='14px "Segoe UI"'; ctx.fillText('v12（開発中）',cx,250);
+  ctx.restore();
+  // 「はじめる」のうしろの光と台（ボタン本体は drawButtons が金のグラデーションで塗る）
+  const bx=cx-150, by=288, bw=300, bh=62, pulse=0.5+0.5*Math.sin(t*3.6);
+  ctx.save();
+  ctx.shadowColor='rgba(255,196,70,'+(0.55+0.4*pulse).toFixed(2)+')'; ctx.shadowBlur=18+16*pulse;
+  ctx.fillStyle='#a3520a'; rrect(bx,by+6,bw,bh,31); ctx.fill();
+  ctx.shadowColor='rgba(0,0,0,0)'; ctx.shadowBlur=0;
+  ctx.lineWidth=6; ctx.strokeStyle='rgba(255,255,255,'+(0.16+0.24*pulse).toFixed(2)+')';
+  rrect(bx-6,by-6,bw+12,bh+18,37); ctx.stroke();
+  ctx.restore();
+  const bcol=ctx.createLinearGradient(0,by,0,by+bh), bhot=ctx.createLinearGradient(0,by,0,by+bh);
+  bcol.addColorStop(0,'#fff3a8'); bcol.addColorStop(0.55,'#ffc83a'); bcol.addColorStop(1,'#ff9a1e');
+  bhot.addColorStop(0,'#fffbe0'); bhot.addColorStop(0.55,'#ffdc6e'); bhot.addColorStop(1,'#ffb84a');
   // 4頭を並べる
   const y=H-64;
   DINOS.forEach((d,i)=>{ const x=180+i*200;
     drawDino(d,x,y,86*d.scale,spriteOf(d,clock()/220+i*1.7),{bob:Math.sin(clock()/380+i)*2});
     txt(d.name,x,y+24,'#22314c','bold 15px "Segoe UI"','center'); });
   button(W/2-130,H-46,260,0,'',null,{}); BTN.pop();
-  button(W/2-130,300,260,54,'▶ はじめる',()=>{ state='ranch'; BGM.play('bgmRanch'); },
-    {col:'rgba(230,160,40,0.92)',colHot:'rgba(255,190,70,0.98)',fg:'#2a1c00'});
+  button(bx,by,bw,bh,'▶ はじめる',()=>{ state='ranch'; BGM.play('bgmRanch'); },
+    {col:bcol,colHot:bhot,fg:'#3a1c00',line:'#fff',r:31,font:'900 27px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif'});
 }
 // 細いゲージ1本（元気・つかれ・能力で共用）
 function gauge(x,y,w,h,v,max,col,bg){
