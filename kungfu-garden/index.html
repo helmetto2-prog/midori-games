@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-<title>カンフーガーデン v19 〜修行の段位で積み上がる拳法城〜</title>
+<title>カンフーガーデン v20 〜修行の段位で積み上がる拳法城〜</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html, body { background:#0c1024; touch-action:none; overscroll-behavior:none; }
@@ -1291,26 +1291,58 @@ function drawIntroCard(){ const ic=G.introCard, im=IMG['card_'+ic.type]; if(!im|
   ctx.fillStyle='#cbd'; ctx.font='10px "Segoe UI"'; ctx.fillText(ic.note, x+w/2, y+h+30);
   ctx.restore(); }
 
-function renderTitle(){ ctx.textAlign='center';
-  // 主人公キービジュアル（なのばなな）を背景に、可読性の暗幕グラデを重ねる
+// ── v20：タイトル画面を作り直し（絵の顔を隠さない位置に大きなロゴ・明滅するスタートの帯）──
+function titleLogoKF(text,cx,y,size,t,delay,c0,c1,c2,glow){
+  ctx.save(); ctx.textAlign='center'; ctx.textBaseline='alphabetic'; ctx.lineJoin='round';
+  ctx.font='900 '+size+'px "Yu Gothic UI","Hiragino Sans","Meiryo","Segoe UI",sans-serif';
+  const chars=[...text], ws=chars.map(ch=>ctx.measureText(ch).width), total=ws.reduce((p,q)=>p+q,0);
+  let x=cx-total/2;
+  chars.forEach((ch,i)=>{
+    const e=Math.max(0,Math.min(1,(t-delay-i*0.08)/0.4));                          // 1文字ずつ、上から打ちこむように入る
+    const sc=e<1 ? 2.2-1.2*e*e : 1, bob=Math.sin(t*2-i*0.6)*2*e;
+    ctx.save(); ctx.translate(x+ws[i]/2, y+bob); ctx.scale(sc,sc); ctx.globalAlpha=e;
+    ctx.shadowColor=glow; ctx.shadowBlur=20;
+    ctx.strokeStyle='#1a0508'; ctx.lineWidth=size*0.2; ctx.strokeText(ch,0,0);
+    ctx.shadowBlur=0;
+    ctx.strokeStyle='#fff3d0'; ctx.lineWidth=size*0.075; ctx.strokeText(ch,0,0);
+    const g=ctx.createLinearGradient(0,-size*0.9,0,size*0.12); g.addColorStop(0,c0); g.addColorStop(0.5,c1); g.addColorStop(1,c2);
+    ctx.fillStyle=g; ctx.fillText(ch,0,0);
+    ctx.restore(); x+=ws[i]; });
+  ctx.restore();
+}
+function renderTitle(){ ctx.textAlign='center'; const t=clock()/1000;
+  // 主人公キービジュアルを背景に。上（顔）は明るいまま、下だけ暗くして字を読みやすく
   if(IMG.title_bg && IMG.title_bg.complete){ ctx.drawImage(IMG.title_bg,0,0,W,H);
     const gr=ctx.createLinearGradient(0,0,0,H);
-    gr.addColorStop(0,'rgba(10,6,18,0.74)'); gr.addColorStop(0.42,'rgba(10,6,18,0.22)'); gr.addColorStop(1,'rgba(10,6,18,0.80)');
-    ctx.fillStyle=gr; ctx.fillRect(0,0,W,H);
-    ctx.fillStyle='rgba(0,0,0,0.45)'; rrect(24,262,W-48,126,10); ctx.fill(); }
-  else drawHumanoid(W/2, 248, 26, 0, 1, PAL.hero, {});
-  ctx.fillStyle='#ffca4a'; ctx.font='bold 42px "Segoe UI"'; ctx.fillText('スーパー', W/2, 120);
-  ctx.fillStyle='#ff6a6a'; ctx.font='bold 42px "Segoe UI"'; ctx.fillText('カンフー風', W/2, 166);
-  ctx.fillStyle='#ffe0b0'; ctx.font='13px "Segoe UI"';
-  ctx.fillText('拳法城に囚われた師父を救え。龍宮の城から紅蓮の砦へ――', W/2, 280);
-  const info=['移動:矢印/WASD ／ 攻撃:J・Space（長押しで溜めオーラ）／ジャンプ:K ／気功波:L(ゲージ満タン時)',
+    gr.addColorStop(0,'rgba(10,6,18,0.30)'); gr.addColorStop(0.30,'rgba(10,6,18,0.05)'); gr.addColorStop(0.52,'rgba(10,6,18,0.62)'); gr.addColorStop(1,'rgba(10,6,18,0.90)');
+    ctx.fillStyle=gr; ctx.fillRect(0,0,W,H); }
+  else drawHumanoid(W/2, 170, 26, 0, 1, PAL.hero, {});
+  // 英字の小見出し
+  ctx.save(); ctx.font='bold 12px "Segoe UI",sans-serif'; ctx.fillStyle='rgba(255,226,160,0.92)'; ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=6;
+  { const s='KUNG-FU GARDEN', step=12; [...s].forEach((ch,i)=>ctx.fillText(ch, W/2-(s.length-1)*step/2+i*step, 26)); }
+  ctx.restore();
+  // ロゴ（2段）
+  titleLogoKF('スーパー', W/2, 252, 30, t, 0.10, '#fffbe0','#ffd54a','#ff9a2e','rgba(255,170,60,0.9)');
+  titleLogoKF('カンフー風', W/2, 312, 62, t, 0.35, '#fff1c4','#ff5a4a','#b3121c','rgba(255,70,50,0.95)');
+  // ひとこと
+  ctx.save(); ctx.shadowColor='rgba(0,0,0,0.9)'; ctx.shadowBlur=6;
+  ctx.fillStyle='#ffe6b8'; ctx.font='13px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif';
+  ctx.fillText('拳法城に囚われた師父を救え。龍宮の城から紅蓮の砦へ――', W/2, 338); ctx.restore();
+  // スタートの合図（ふわっと明滅）
+  { const p=0.5+0.5*Math.sin(t*3.2), w=300, h=36, x=W/2-w/2, y=350;
+    ctx.save(); ctx.globalAlpha=0.75+0.25*p; ctx.shadowColor='rgba(255,200,80,0.95)'; ctx.shadowBlur=8+12*p;
+    ctx.fillStyle='rgba(60,10,14,0.88)'; rrect(x,y,w,h,18); ctx.fill(); ctx.shadowBlur=0;
+    ctx.strokeStyle='#ffca4a'; ctx.lineWidth=2; rrect(x,y,w,h,18); ctx.stroke();
+    ctx.fillStyle='#fff'; ctx.font='900 17px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif';
+    ctx.fillText('▶  スペース ／ タップ でスタート', W/2, y+24); ctx.restore(); }
+  // 操作と決まり（小さく）
+  const info=['移動 矢印/WASD　攻撃 J・Space（長押しで溜めオーラ）　ジャンプ K　気功波 L（ゲージ満タン時）',
               '壺を壊すと強化アイテムや金貨、稀に隠し扉でボーナス面へ',
               '敵を全滅で次の間へ（残りは画面右上）。◯-4のボスは攻撃中が弱点',
               '赤い輪＝敵が現れる合図。倒れても“関所コンティニュー”が2回'];
-  ctx.font='12px "Segoe UI"'; ctx.fillStyle='#cbd'; info.forEach((t,i)=>ctx.fillText(t,W/2,306+i*23));
-  const blink=(clock()/500|0)%2===0; ctx.fillStyle=blink?'#ffca4a':'#665'; ctx.font='bold 22px "Segoe UI"'; ctx.fillText('スペース / クリックでスタート', W/2, 430);
+  ctx.font='10.5px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif'; ctx.fillStyle='rgba(200,206,226,0.92)';
+  info.forEach((s,i)=>ctx.fillText(s,W/2,401+i*12.5));
   drawRankBoard(Record.get()); }
-
 /* 修行の段位の札（S5）：タイトル下部に常設。
    〈今の段位〉〈次の段位までの具体的な条件〉〈通算の足あと〉の3行を必ず同じ場所に出し、
    負けて戻ってきた時にも「前より進んでいる／次はこれ」が一目で分かるようにする。 */

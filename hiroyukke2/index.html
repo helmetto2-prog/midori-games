@@ -1340,8 +1340,8 @@ function drawMsgWindow(){
 function render(){
   const g=ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#141a3a'); g.addColorStop(1,'#0c1024');
   ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
-  ctx.textAlign='left'; ctx.fillStyle='#ffe27a'; ctx.font='bold 22px "Segoe UI"'; ctx.fillText('ひろゆっけ２',16,30);
-  ctx.fillStyle='#8aa'; ctx.font='12px "Segoe UI"'; ctx.fillText('〜論破クエスト〜',146,29);
+  if(state!=='title'){ ctx.textAlign='left'; ctx.fillStyle='#ffe27a'; ctx.font='bold 22px "Segoe UI"'; ctx.fillText('ひろゆっけ２',16,30);
+  ctx.fillStyle='#8aa'; ctx.font='12px "Segoe UI"'; ctx.fillText('〜論破クエスト〜',146,29); }   // v20：タイトルでは大きなロゴがあるので出さない
   ctx.textAlign='right'; ctx.fillStyle=SFX.on?'#7CFC00':'#888'; ctx.font='12px "Segoe UI"'; ctx.fillText((SFX.on?'♪ON':'♪OFF')+' (M)',W-14,20); ctx.textAlign='left';
 
   if (state==='title'){ renderTitle(); return; }
@@ -1683,35 +1683,65 @@ function renderTitle(){
   drawScene('classroom');
   ctx.save(); drawHiro(110,206,0.5,'point',false,true); drawEnemy(370,206,0.7,'smug',false,0,'kid',''); ctx.restore();
   drawSceneFore('classroom','ガキ大将タケシ');
-  ctx.textAlign='center';
-  ctx.fillStyle='#fff'; ctx.font='bold 38px "Segoe UI"'; ctx.fillText('ひろゆっけ２',W/2,392);
-  ctx.fillStyle='#ffe27a'; ctx.font='bold 16px "Segoe UI"'; ctx.fillText('〜 論破クエスト 〜',W/2,420);
+  // ── v20：タイトル画面を作り直し（まんが風の大きなロゴ・「論破！」のはんこ・明滅するスタートの帯）──
+  const tt=clock()/1000; ctx.textAlign='center';
+  { const g=ctx.createLinearGradient(0,330,0,H); g.addColorStop(0,'rgba(8,10,30,0)'); g.addColorStop(0.12,'rgba(8,10,30,0.55)'); g.addColorStop(1,'rgba(8,10,30,0.25)');
+    ctx.fillStyle=g; ctx.fillRect(0,330,W,H-330); }
+  { ctx.save(); ctx.translate(W/2,398); ctx.rotate(-0.035); ctx.lineJoin='round';
+    ctx.font='900 60px "Yu Gothic UI","Hiragino Sans","Meiryo","Segoe UI",sans-serif';
+    const chars=[...'ひろゆっけ２'], ws=chars.map(ch=>ctx.measureText(ch).width), total=ws.reduce((p,q)=>p+q,0);
+    let x=-total/2;
+    chars.forEach((ch,i)=>{ const e=Math.max(0,Math.min(1,(tt-0.1-i*0.07)/0.35));
+      const sc=1+2.70158*Math.pow(e-1,3)+1.70158*Math.pow(e-1,2), bob=Math.sin(tt*2.4-i*0.7)*2.2*e;
+      ctx.save(); ctx.translate(x+ws[i]/2,bob); ctx.scale(sc,sc); ctx.globalAlpha=e;
+      ctx.shadowColor='rgba(0,0,0,0.6)'; ctx.shadowOffsetY=5; ctx.shadowBlur=0;
+      ctx.strokeStyle='#10142e'; ctx.lineWidth=13; ctx.strokeText(ch,0,0);
+      ctx.shadowColor='transparent'; ctx.shadowOffsetY=0;
+      ctx.strokeStyle='#ffffff'; ctx.lineWidth=5; ctx.strokeText(ch,0,0);
+      const g=ctx.createLinearGradient(0,-52,0,6); g.addColorStop(0,'#fff9c8'); g.addColorStop(0.5,'#ffd92e'); g.addColorStop(1,'#ff8a1e');
+      ctx.fillStyle=g; ctx.fillText(ch,0,0); ctx.restore(); x+=ws[i]; });
+    // 「論破！」のはんこ（どんっと押される）
+    const e2=Math.max(0,Math.min(1,(tt-0.75)/0.22)); if(e2>0){ const sc=3-2*e2;
+      ctx.save(); ctx.translate(total/2-6,-58); ctx.rotate(0.24); ctx.scale(sc,sc); ctx.globalAlpha=e2;
+      ctx.fillStyle='rgba(214,32,40,0.94)'; rrect(-39,-17,78,34,7); ctx.fill();
+      ctx.strokeStyle='#fff'; ctx.lineWidth=2.5; rrect(-39,-17,78,34,7); ctx.stroke();
+      ctx.fillStyle='#fff'; ctx.font='900 21px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif'; ctx.fillText('論破！',0,8); ctx.restore(); }
+    ctx.restore(); }
+  // 副題の帯
+  { ctx.save(); ctx.translate(W/2,424); ctx.rotate(-0.035);
+    ctx.fillStyle='#d62028'; ctx.beginPath(); ctx.moveTo(-112,-13); ctx.lineTo(112,-13); ctx.lineTo(102,0); ctx.lineTo(112,13); ctx.lineTo(-112,13); ctx.lineTo(-102,0); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.font='900 16px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif'; ctx.fillText('〜 論破クエスト 〜',0,6); ctx.restore(); }
   // 世界観と目的（最初の3分で「なぜ戦うのか」を伝える）
-  ctx.fillStyle='#e8eeff'; ctx.font='14px "Segoe UI"';
-  ctx.fillText('屁理屈が街を覆う時代。論客たちが今日も声を張り上げる。',W/2,448);
-  ctx.fillText('あなたはひろゆっけ。全4話・4人を論破し、街に理屈を取り戻せ。',W/2,470);
+  ctx.fillStyle='#e8eeff'; ctx.font='13px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif';
+  ctx.fillText('屁理屈が街を覆う時代。論客たちが今日も声を張り上げる。',W/2,455);
+  ctx.fillText('あなたはひろゆっけ。全4話・4人を論破し、街に理屈を取り戻せ。',W/2,473);
+  // スタートの合図（ふわっと明滅）
+  { const p=0.5+0.5*Math.sin(tt*3.2), w=330, h=36, x=W/2-w/2, y=484;
+    ctx.save(); ctx.globalAlpha=0.78+0.22*p; ctx.shadowColor='rgba(255,220,90,0.95)'; ctx.shadowBlur=8+12*p;
+    ctx.fillStyle='rgba(22,28,70,0.92)'; rrect(x,y,w,h,18); ctx.fill(); ctx.shadowBlur=0;
+    ctx.strokeStyle='#ffe27a'; ctx.lineWidth=2; rrect(x,y,w,h,18); ctx.stroke();
+    ctx.fillStyle='#fff'; ctx.font='900 17px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif';
+    ctx.fillText('▶  タップ ／ スペース でスタート', W/2, y+24); ctx.restore(); }
   const info=['主張のタイプを見抜いてカードで反撃（2戦目からは？？？）',
     '論客ごとに口ぐせがある —— くせと 👁読み を手がかりに当てろ',
     '敵を倒して EXP と ゴールド をかせぎ、レベルアップ！','どうぐ屋で買い物 → ほうびカードでデッキ強化',
     '敵ゲージMAXで必殺技が来る…ガードか おふだで しのげ！',
     '相手を半分まで追いつめると 観客が乱入する（話ごとに1回）',
     '負けても その話の あたまから 仕切りなおせる（1周2かいまで）'];
-  ctx.font='13px "Segoe UI"'; ctx.fillStyle='#bcd'; info.forEach((t,i)=>ctx.fillText(t,W/2,492+i*19));
+  ctx.font='11.5px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif'; ctx.fillStyle='rgba(176,192,224,0.92)'; info.forEach((t,i)=>ctx.fillText(t,W/2,540+i*13.5));
   const best=Store.get(), rank=StoreRank.get(), deep=StoreDeep.get();
   let rec=[];
   if (deep>0) rec.push('自己最深: 第'+deep+'話');
   if (best>0) rec.push('最短クリア: '+best+'ターン');
   if (rank)   rec.push('最高ランク: '+rank);
-  if (rec.length){ ctx.fillStyle='#9fb0e8'; ctx.font='13px "Segoe UI"'; ctx.fillText(rec.join('　'),W/2,616); }
+  if (rec.length){ ctx.fillStyle='#9fb0e8'; ctx.font='13px "Segoe UI"'; ctx.fillText(rec.join('　'),W/2,636); }
   // 📓くせノート＝論破した論客の数だけ●が灯る永続コレクション
   const nc=noteCount();
   ctx.font='bold 13px "Segoe UI"';
   ctx.fillStyle= nc>=4 ? '#ffe27a' : '#7ec8ff';
-  ctx.fillText(nc>=4 ? '📓 くせノート 4/4 —— 称号『くせ看破マスター』' : '📓 くせノート '+nc+'/4', W/2, 636);
+  ctx.fillText(nc>=4 ? '📓 くせノート 4/4 —— 称号『くせ看破マスター』' : '📓 くせノート '+nc+'/4 —— 書きとめた相手は、次から 👁読み に くせの内訳が出る', W/2, 652);
   for (let i=0;i<4;i++){ ctx.fillStyle= noteHas(i)?'#7ec8ff':'rgba(255,255,255,0.16)';
-    ctx.beginPath(); ctx.arc(W/2-108+i*11, 632, 3.4, 0, TAU); ctx.fill(); }
-  ctx.fillStyle='#7b86ad'; ctx.font='11px "Segoe UI"';
-  ctx.fillText('書きとめた相手とは、次から 👁読み に くせの内訳が出る', W/2, 650);
+    ctx.beginPath(); ctx.arc(W/2-16+i*11, 623, 3, 0, TAU); ctx.fill(); }
   // 🐢じっくりモード（タップ / Zキーで切替・永続）
   const sr=slowRect(), on=slowOn();
   ctx.fillStyle= on?'rgba(126,200,255,0.18)':'rgba(255,255,255,0.06)'; rrect(sr.x,sr.y,sr.w,sr.h,11); ctx.fill();
@@ -1722,8 +1752,7 @@ function renderTitle(){
   ctx.fillStyle= StoreNoCon.get() ? '#ffe27a' : '#5b6488'; ctx.font='bold 12px "Segoe UI"';
   ctx.fillText(StoreNoCon.get()?'👑 称号『無敗の論客』＋真エンド —— 仕切りなおさず全4話制覇'
                               :'称号『無敗の論客』… 仕切りなおさず全4話制覇で授与＋真エンド',W/2,696);
-  const blink=(clock()/500|0)%2===0; ctx.fillStyle=blink?'#ffe27a':'#667'; ctx.font='bold 19px "Segoe UI"';
-  ctx.fillText('タップ / クリック / スペースでスタート', W/2, 716);
+  ctx.fillStyle='#6f7aa6'; ctx.font='11px "Segoe UI"'; ctx.fillText('画面のどこをタップしても始まります　／　M：音', W/2, 714);
 }
 
 // ---- Input -------------------------------------------------------------------
