@@ -137,7 +137,8 @@ const Input = (function(){
   C.addEventListener('click', ev => {
     SFX.ensure();
     if (state==='intro') confirmIntro();
-    else if (state==='title'||state==='over') startGame();
+    else if (state==='title'){ if (!titleTap(ev)) startGame(); }           // v11：タイトル画面を作り直し（あそびかたボタン／閉じる）
+    else if (state==='over') startGame();
     else if (state==='win'){ goEndless(); }
     else if (state==='levelup') pickAtPointer(ev);
     else if (state==='play') tapPlay(ev);                                  // v10：⏸/♪のタップボタン
@@ -1082,27 +1083,143 @@ function drawHUD(){
 
 function fmtTime(ms){ const s=Math.floor(ms/1000); return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); }
 
-function renderTitle(){
-  ctx.textAlign='center';
-  ctx.save(); ctx.shadowColor='#5aa6ff'; ctx.shadowBlur=24;
-  ctx.fillStyle='#fff'; ctx.font='bold 52px "Segoe UI"'; ctx.fillText('ネオ・サバイバー', W/2, 180);
+// ── v11：タイトル画面を作り直し（ネオンの大きなロゴ・自機と敵の実演・記録の札・丸い帯のスタート・「あそびかた」の面）──
+const TITLE_FONT='"Yu Gothic UI","Hiragino Sans","Meiryo","Segoe UI",sans-serif';
+const TITLE_HELP_BTN={w:250,h:40,y:508};          // 「あそびかた」ボタン（横はまん中）
+const TITLE_DEMO=['grunt','fast','grunt','tank','bomber','fast','grunt','brute','fast','grunt'];   // 実演に出す敵
+let titleHelp=false;                               // 「あそびかた」の面を開いているか
+let titleRec={at:-1e9,best:0,kills:0,lv:0};        // 記録の札（保存データの読み直しは1秒に1回だけ）
+function titleRecord(){
+  const now=clock(); if(now-titleRec.at<1000) return titleRec;
+  titleRec={at:now, best:Store.get(), kills:LifeStats.getKills(), lv:LifeStats.getMaxLv()}; return titleRec;
+}
+// もとの説明文（タイトルには上の2行だけ・全部は「あそびかた」の面で出す）
+function titleInfo(){ return [
+  IS_TOUCH ? '画面をなぞって移動（指を置いた所がスティック・攻撃は自動）'
+           : 'WASD / 矢印キーで移動（攻撃は自動）',
+  IS_TOUCH ? 'ジェムを拾ってレベルアップ → 3択強化はカードをタップ'
+           : 'ジェムを拾ってレベルアップ → 3択強化（Eでリロール1回）',
+  '武器は4種：ショット / オービット / ノヴァ / サンダー',
+  '毎分ボス出現！倒すと宝箱（強化+回復）',
+  '💣=画面一掃　🧲=全回収　🍖=回復']; }
+// ロゴ：1文字ずつ飛びこんで、そのあと波うつ。maxW をこえる時は字を小さくする
+function titleLogo(text,cx,y,size,t,maxW){
+  ctx.save(); ctx.textAlign='center'; ctx.textBaseline='alphabetic'; ctx.lineJoin='round';
+  const chars=[...text]; let ws, total;
+  const fit=()=>{ ctx.font='900 '+size+'px '+TITLE_FONT; ws=chars.map(ch=>ctx.measureText(ch).width); total=ws.reduce((p,q)=>p+q,0); };
+  fit(); if(total>maxW){ size=Math.floor(size*maxW/total); fit(); }
+  let x=cx-total/2;
+  chars.forEach((ch,i)=>{
+    const e=Math.max(0,Math.min(1,(t-0.15-i*0.07)/0.45));
+    const back=1+2.70158*Math.pow(e-1,3)+1.70158*Math.pow(e-1,2);
+    const bob=Math.sin(t*2.2-i*0.55)*3*e;
+    ctx.save(); ctx.translate(x+ws[i]/2, y+bob-(1-e)*44); ctx.scale(back,back); ctx.globalAlpha=e;
+    ctx.shadowColor='rgba(57,199,255,0.95)'; ctx.shadowBlur=26;
+    ctx.strokeStyle='#07103a'; ctx.lineWidth=13; ctx.strokeText(ch,0,0);
+    ctx.shadowBlur=0;
+    ctx.strokeStyle='#ffffff'; ctx.lineWidth=5; ctx.strokeText(ch,0,0);
+    const g=ctx.createLinearGradient(0,-size*0.9,0,size*0.12);
+    g.addColorStop(0,'#f2fdff'); g.addColorStop(0.45,'#5fd8ff'); g.addColorStop(1,'#b05cff');
+    ctx.fillStyle=g; ctx.fillText(ch,0,0);
+    ctx.restore(); x+=ws[i]; });
   ctx.restore();
-  ctx.fillStyle='#9fe8c0'; ctx.font='17px "Segoe UI"'; ctx.fillText('10分間、押し寄せる敵の群れを生き延びろ', W/2, 224);
-  const info = [ IS_TOUCH ? '画面をなぞって移動（指を置いた所がスティック・攻撃は自動）'
-                          : 'WASD / 矢印キーで移動（攻撃は自動）',
-                 IS_TOUCH ? 'ジェムを拾ってレベルアップ → 3択強化はカードをタップ'
-                          : 'ジェムを拾ってレベルアップ → 3択強化（Eでリロール1回）',
-                 '武器は4種：ショット / オービット / ノヴァ / サンダー',
-                 '毎分ボス出現！倒すと宝箱（強化+回復）',
-                 '💣=画面一掃　🧲=全回収　🍖=回復'];
-  ctx.font='15px "Segoe UI"'; ctx.fillStyle='#bcd'; info.forEach((t,i)=>ctx.fillText(t,W/2,280+i*28));
-  ctx.fillStyle='#6d8fae'; ctx.font='13px "Segoe UI"';
-  ctx.fillText('壊れかけたコロニーの最終防衛線。生き延びた先に、まだ何かが残っている。', W/2, 424);
-  ctx.fillStyle='#8fa8c8'; ctx.font='13px "Segoe UI"';
-  ctx.fillText('累計撃破 '+LifeStats.getKills()+' ／ 最高到達 Lv'+LifeStats.getMaxLv(), W/2, 444);
-  ctx.fillStyle='#ffb0c0'; ctx.font='14px "Segoe UI"'; ctx.fillText('自己ベスト '+fmtTime(Store.get()*1000), W/2, 468);
-  const blink=(clock()/500|0)%2===0; ctx.fillStyle=blink?'#ffe27a':'#667'; ctx.font='bold 24px "Segoe UI"';
-  ctx.fillText(IS_TOUCH?'タップでスタート':'スペース / クリックでスタート', W/2, 526);
+}
+// 実演：自機が8の字に飛び、まわりから敵が押し寄せては撃ち落とされる（本編の drawPlayer / drawEnemy をそのまま使う）
+// ※ 本編の絵は G を見て描くので、描く間だけ G を仮の入れ物に差し替え、終わったら必ず元に戻す
+function titleDemo(cx,cy,t){
+  const pos=tt=>[cx+Math.cos(tt*0.8)*64, cy+Math.sin(tt*1.6)*24];
+  const angAt=tt=>Math.atan2(Math.cos(tt*1.6)*38.4, -Math.sin(tt*0.8)*51.2);
+  const [sx,sy]=pos(t), S=1.5, keep=G;
+  try{
+    G={x:sx,y:sy};
+    TITLE_DEMO.forEach((ty,i)=>{ const T=ENEMY_TYPES[ty], p=(t*0.20+i*0.137)%1, a=i*TAU/TITLE_DEMO.length+0.3+Math.sin(t*0.5+i)*0.12;
+      const R=150-104*p, ex=cx+Math.cos(a)*R*1.9, ey=cy+Math.sin(a)*R*0.62;
+      if(p>0.9){ const q=(p-0.9)/0.1;                                                     // 撃ち落とされた輪
+        ctx.strokeStyle='rgba(255,226,122,'+(1-q).toFixed(2)+')'; ctx.lineWidth=2.5;
+        ctx.beginPath(); ctx.arc(ex,ey,T.r+q*22,0,TAU); ctx.stroke(); return; }
+      if(p>0.62){ const f=(p-0.62)/0.28;                                                  // 自動で飛ぶ弾
+        ctx.fillStyle='#ffe27a'; ctx.beginPath(); ctx.arc(lerp(sx,ex,f),lerp(sy,ey,f),3,0,TAU); ctx.fill(); }
+      ctx.globalAlpha=Math.min(1,p*5);
+      drawEnemy({type:ty,x:ex,y:ey,r:T.r,col:T.col,hp:1,maxhp:1,boss:false});
+      ctx.globalAlpha=1; });
+    const trail=[]; for(let k=6;k>=1;k--){ const [px,py]=pos(t-k*0.045); trail.push({x:(px-sx)/S,y:(py-sy)/S,ang:angAt(t-k*0.045)}); }
+    G={x:0,y:0,ang:angAt(t),trail:trail,pickup:0,moving:true,hurtCd:0};
+    ctx.save(); ctx.translate(sx,sy); ctx.scale(S,S); drawPlayer(); ctx.restore();
+  } finally { G=keep; ctx.globalAlpha=1; ctx.lineWidth=1; }
+}
+// タイトルで押した場所（画面の座標→キャンバスの座標）。あそびかたを開く／閉じる時は true を返す
+function titleTap(ev){
+  if(state!=='title') return false;
+  if(titleHelp){ titleHelp=false; SFX.blip(); return true; }
+  const r=C.getBoundingClientRect(); if(!r.width||!r.height) return false;
+  const x=(ev.clientX-r.left)*(W/r.width), y=(ev.clientY-r.top)*(H/r.height), b=TITLE_HELP_BTN;
+  if(x>=W/2-b.w/2-10 && x<=W/2+b.w/2+10 && y>=b.y-10 && y<=b.y+b.h+10){ titleHelp=true; SFX.blip(); return true; }
+  return false;
+}
+function renderTitle(){
+  const cx=W/2, t=clock()/1000;
+  // 下地：まん中を少し明るく、ふちを暗く
+  { const g=ctx.createRadialGradient(cx,290,40,cx,300,H*0.75);
+    g.addColorStop(0,'rgba(40,70,170,0.28)'); g.addColorStop(0.55,'rgba(10,14,34,0.10)'); g.addColorStop(1,'rgba(2,4,14,0.75)');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H); }
+  // 英字の小見出し
+  ctx.save(); ctx.textAlign='center'; ctx.font='bold 13px "Segoe UI",sans-serif'; ctx.fillStyle='rgba(150,230,255,0.9)';
+  { const s='NEO SURVIVOR', step=15; [...s].forEach((ch,i)=>ctx.fillText(ch, cx-(s.length-1)*step/2+i*step, 62)); }
+  ctx.strokeStyle='rgba(150,230,255,0.45)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(cx-240,58); ctx.lineTo(cx-104,58); ctx.moveTo(cx+104,58); ctx.lineTo(cx+240,58); ctx.stroke();
+  ctx.restore();
+  // ロゴ
+  titleLogo('ネオ・サバイバー', cx, 142, 70, t, W*0.88);
+  // ひとこと
+  ctx.textAlign='center'; ctx.font='bold 17px '+TITLE_FONT; ctx.fillStyle='#9fe8c0';
+  ctx.fillText('10分間、押し寄せる敵の群れを生き延びろ', cx, 184);
+  // 実演
+  titleDemo(cx, 292, t);
+  // 記録の札
+  { const rec=titleRecord(), items=['自己ベスト '+fmtTime(rec.best*1000), '累計撃破 '+rec.kills, '最高到達 Lv'+rec.lv];
+    ctx.font='bold 14px '+TITLE_FONT; ctx.textAlign='center';
+    const ws=items.map(s=>ctx.measureText(s).width+26), total=ws.reduce((p,q)=>p+q,0)+10*(items.length-1);
+    let x=cx-total/2; const y=402;
+    items.forEach((s,i)=>{ rrect(x,y,ws[i],28,14); ctx.fillStyle='rgba(8,12,36,0.78)'; ctx.fill();
+      ctx.strokeStyle='rgba(255,176,192,0.6)'; ctx.lineWidth=1; ctx.stroke();
+      ctx.fillStyle='#ffc4d0'; ctx.fillText(s, x+ws[i]/2, y+19); x+=ws[i]+10; }); }
+  // スタートの合図（ふわっと明滅する丸い帯）
+  { const p=0.5+0.5*Math.sin(t*3.2), w=400, h=52, x=cx-w/2, y=444;
+    ctx.save(); ctx.globalAlpha=0.74+0.26*p; ctx.shadowColor='rgba(77,195,255,0.95)'; ctx.shadowBlur=8+14*p;
+    rrect(x,y,w,h,26); ctx.fillStyle='rgba(14,30,84,0.90)'; ctx.fill(); ctx.shadowBlur=0;
+    ctx.strokeStyle='#6fe0ff'; ctx.lineWidth=2.5; ctx.stroke();
+    ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.font='900 23px '+TITLE_FONT;
+    ctx.fillText(IS_TOUCH?'▶  タップでスタート':'▶  クリック ／ Space でスタート', cx, y+35); ctx.restore(); }
+  // 「あそびかた」ボタン
+  { const b=TITLE_HELP_BTN, x=cx-b.w/2;
+    rrect(x,b.y,b.w,b.h,20); ctx.fillStyle='rgba(18,24,60,0.80)'; ctx.fill();
+    ctx.strokeStyle='rgba(150,170,240,0.65)'; ctx.lineWidth=1.5; ctx.stroke();
+    ctx.fillStyle='#d6e2ff'; ctx.textAlign='center'; ctx.font='bold 18px '+TITLE_FONT;
+    ctx.fillText(IS_TOUCH?'？ あそびかた':'？ あそびかた（H）', cx, b.y+27); }
+  // 操作の要点（小さく2〜3行）
+  { const info=titleInfo(); ctx.textAlign='center'; ctx.font='15px '+TITLE_FONT; ctx.fillStyle='rgba(165,185,225,0.92)';
+    ctx.fillText(info[0], cx, 578); ctx.fillText(info[1], cx, 600);
+    if(!IS_TOUCH) ctx.fillText('P ポーズ ／ R リスタート ／ M 音', cx, 622); }
+  ctx.lineWidth=1;
+  if(titleHelp) renderTitleHelp();
+}
+// v11：「あそびかた」の面（もとのタイトルにあった説明をここへ移した。文はそのまま）
+function renderTitleHelp(){
+  const cx=W/2, x=16, y=40, w=W-32, h=H-80;
+  ctx.fillStyle='rgba(2,4,14,0.80)'; ctx.fillRect(0,0,W,H);
+  rrect(x,y,w,h,20); ctx.fillStyle='rgba(12,18,48,0.97)'; ctx.fill();
+  ctx.strokeStyle='rgba(111,224,255,0.75)'; ctx.lineWidth=2; ctx.stroke(); ctx.lineWidth=1;
+  ctx.textAlign='center';
+  ctx.fillStyle='#8fe9ff'; ctx.font='900 30px '+TITLE_FONT; ctx.fillText('あそびかた', cx, y+56);
+  ctx.fillStyle='#9fe8c0'; ctx.font='bold 17px '+TITLE_FONT; ctx.fillText('10分間、押し寄せる敵の群れを生き延びろ', cx, y+98);
+  ctx.font='18px '+TITLE_FONT; ctx.fillStyle='#dbe6ff';
+  titleInfo().forEach((s,i)=>ctx.fillText(s, cx, y+152+i*44));
+  ctx.fillStyle='#b9c8ea'; ctx.font='16px '+TITLE_FONT;
+  ctx.fillText(IS_TOUCH?'⏸ でポーズ':'P ポーズ ／ R リスタート ／ M 音', cx, y+152+5*44);
+  ctx.fillStyle='#7f9fc0'; ctx.font='15px '+TITLE_FONT;
+  ctx.fillText('壊れかけたコロニーの最終防衛線。生き延びた先に、まだ何かが残っている。', cx, y+h-78);
+  ctx.fillStyle='rgba(165,185,225,0.95)'; ctx.font='bold 15px '+TITLE_FONT;
+  ctx.fillText(IS_TOUCH?'タップでとじる':'クリック ／ H ／ Space でとじる', cx, y+h-28);
 }
 function renderIntro(){
   ctx.textAlign='center';
@@ -1188,6 +1305,10 @@ function onKey(code){
     return;
   }
   if (state==='intro'){ if (code==='Space'||code==='Enter') confirmIntro(); return; }
+  if (state==='title'){                                  // v11：タイトル画面を作り直し（H であそびかたを開閉。開いている間の Space / Enter / Esc は「とじる」）
+    if (code==='KeyH'){ titleHelp=!titleHelp; SFX.blip(); return; }
+    if (titleHelp){ if (code==='Space'||code==='Enter'||code==='Escape'){ titleHelp=false; SFX.blip(); } return; }
+  }
   if (code==='KeyR'){ startGame(); return; }
   if (state==='title' || state==='over'){ if (code==='Space'||code==='Enter') startGame(); return; }
   if (state==='win'){ if (code==='Space'||code==='Enter') goEndless(); return; }
