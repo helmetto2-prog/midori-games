@@ -67,7 +67,9 @@ const Input = (function(){
     onKey(e.code);
   });
   document.addEventListener('keyup', e => keys.delete(e.code));
-  C.addEventListener('click', () => { SFX.ensure(); if (state==='title'||state==='over') startGame(); });
+  C.addEventListener('click', e => { SFX.ensure();
+    if (state==='title' && ready() && titleClick(e)) return;           // v05：タイトル画面を作り直し＝「あそびかた」ボタン／面を閉じる
+    if (state==='title'||state==='over') startGame(); });
   return {
     held: code => keys.has(code),
     pressed: code => edge.has(code),
@@ -638,38 +640,129 @@ function bar(x,y,w,h,ratio,col,label){
   ctx.strokeText(label, x+w/2, y+h-3); ctx.fillStyle='#fff'; ctx.fillText(label, x+w/2, y+h-3);
 }
 
+// ── v05：タイトル画面を作り直し（大きなロゴ・ゲートで増える兵の見本・丸いスタートの帯・「あそびかた」の面）──
+//    説明の文はタイトルに2行だけ残し、全部は H キー／「あそびかた」ボタンで開く面で見せる（文はそのまま）。
+const TITLE_FONT='"Yu Gothic UI","Hiragino Sans","Meiryo","Segoe UI",sans-serif';
 let TITLE_DEMO = null;
+let titleHelp=false, titleT0=0;
+const TITLE_HELP_BTN={ x:W/2-150, y:574, w:300, h:42 };            // 「あそびかた」ボタンの場所（キャンバス内の座標）
+const TITLE_INFO = [
+  '大砲から兵隊を撃ち出して、青いゲートで増やすさー。',
+  '赤いゲートは人数が減るから避けること。',
+  '上から降りてくる赤軍とぶつけて、全部やっつけろー。',
+  '← → ／ マウス・指で移動　　Space ／ 長押しで発射',
+];
+// ロゴ：太い字＋濃いふち＋白い細ふち＋たてのグラデーション＋光。「軍団」は青、「カノン」は赤。maxW をこえる時は字を小さくする。
+function titleLogo(text,cx,y,size,maxW,t){
+  ctx.save(); ctx.textAlign='center'; ctx.textBaseline='alphabetic'; ctx.lineJoin='round';
+  ctx.font='900 '+size+'px '+TITLE_FONT;
+  const chars=[...text];
+  let ws=chars.map(ch=>ctx.measureText(ch).width), total=ws.reduce((p,q)=>p+q,0);
+  if(total>maxW){ size=Math.floor(size*maxW/total); ctx.font='900 '+size+'px '+TITLE_FONT;
+    ws=chars.map(ch=>ctx.measureText(ch).width); total=ws.reduce((p,q)=>p+q,0); }
+  let x=cx-total/2;
+  chars.forEach((ch,i)=>{
+    const e=Math.max(0,Math.min(1,(t-0.15-i*0.08)/0.45));                          // 1文字ずつ飛びこんでくる
+    const back=1+2.70158*Math.pow(e-1,3)+1.70158*Math.pow(e-1,2);
+    const bob=Math.sin(t*2.2-i*0.6)*3.5*e;                                           // そのあとは波うつ
+    const blue=i<2;
+    ctx.save(); ctx.translate(x+ws[i]/2, y+bob-(1-e)*46); ctx.scale(back,back); ctx.globalAlpha=e;
+    ctx.shadowColor=blue?'rgba(90,170,255,0.95)':'rgba(255,120,80,0.95)'; ctx.shadowBlur=22;
+    ctx.strokeStyle='#0b1230'; ctx.lineWidth=Math.max(8,size*0.18); ctx.strokeText(ch,0,0);
+    ctx.shadowBlur=0;
+    ctx.strokeStyle='#ffffff'; ctx.lineWidth=Math.max(3,size*0.065); ctx.strokeText(ch,0,0);
+    const g=ctx.createLinearGradient(0,-size*0.9,0,size*0.12);
+    if(blue){ g.addColorStop(0,'#f2fbff'); g.addColorStop(0.45,'#7cc4ff'); g.addColorStop(1,'#1f6fd8'); }
+    else    { g.addColorStop(0,'#fff3d6'); g.addColorStop(0.45,'#ffb04a'); g.addColorStop(1,'#e23a2a'); }
+    ctx.fillStyle=g; ctx.fillText(ch,0,0);
+    ctx.restore(); x+=ws[i]; });
+  ctx.restore();
+}
+// タイトルでのクリック／タップ。true を返したら「ここで受けた」（スタートはしない）
+function titleClick(e){
+  if(titleHelp){ titleHelp=false; return true; }                                    // あそびかたの面は、どこを押しても閉じる
+  const r=C.getBoundingClientRect(); if(!r.width||!r.height) return false;
+  const x=(e.clientX-r.left)*W/r.width, y=(e.clientY-r.top)*H/r.height, b=TITLE_HELP_BTN;
+  if(x>=b.x && x<=b.x+b.w && y>=b.y-8 && y<=b.y+b.h+8){ titleHelp=true; return true; }
+  return false;
+}
 function renderTitle(){
-  ctx.fillStyle='rgba(8,12,30,0.55)'; ctx.fillRect(0,0,W,H);
-  ctx.textAlign='center';
-  ctx.font='bold 50px "Segoe UI"'; ctx.lineWidth=9; ctx.lineJoin='round';
-  ctx.strokeStyle='rgba(0,0,0,0.7)'; ctx.strokeText('軍団カノン', W/2, 130);
-  ctx.fillStyle='#ffe27a'; ctx.fillText('軍団カノン', W/2, 130);
+  const cx=W/2, now=clock(); if(!titleT0) titleT0=now;
+  const t=(now-titleT0)/1000;
+  // 下地：上と下を暗く、まん中（見本の所）は石だたみが見えるように
+  { const g=ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'rgba(6,10,30,0.88)'); g.addColorStop(0.26,'rgba(8,12,30,0.50)'); g.addColorStop(0.60,'rgba(8,12,30,0.42)');
+    g.addColorStop(0.68,'rgba(6,10,28,0.86)'); g.addColorStop(1,'rgba(6,10,28,0.92)');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H); }
+  if(titleHelp){ renderTitleHelp(); return; }
+  // 英字の小見出し
+  ctx.save(); ctx.textAlign='center'; ctx.font='bold 13px "Segoe UI",sans-serif'; ctx.fillStyle='rgba(255,226,122,0.92)';
+  { const s='GUNDAN CANNON', step=14; [...s].forEach((ch,i)=>ctx.fillText(ch, cx-(s.length-1)*step/2+i*step, 48)); }
+  ctx.strokeStyle='rgba(255,226,122,0.5)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(cx-200,43); ctx.lineTo(cx-104,43); ctx.moveTo(cx+104,43); ctx.lineTo(cx+200,43); ctx.stroke();
+  ctx.restore();
+  // ロゴ
+  titleLogo('軍団カノン', cx, 142, 86, W*0.88, t);
+  // ひとこと
+  ctx.save(); ctx.textAlign='center'; ctx.font='bold 16px '+TITLE_FONT; ctx.lineJoin='round';
+  ctx.strokeStyle='rgba(6,10,28,0.85)'; ctx.lineWidth=4; ctx.strokeText(TITLE_INFO[0], cx, 182, W-24);
+  ctx.fillStyle='#e6efff'; ctx.fillText(TITLE_INFO[0], cx, 182, W-24); ctx.restore();
 
-  if (!TITLE_DEMO) TITLE_DEMO = { a: makeCrowd(163, 365, 24), e: makeCrowd(317, 205, 30, {speed:0, img:'ushi'}),
-                                  g1: {x0:90,x1:236,y:265,op:'x',v:3,wob:0}, g2: {x0:244,x1:390,y:265,op:'-',v:10,wob:0}, t:0 };
+  // 見本：青軍が青いゲート（x3）をくぐって 8 → 24 に増える。となりは赤いゲートと赤軍。
+  if (!TITLE_DEMO) TITLE_DEMO = { a: makeCrowd(163, 445, 8), e: makeCrowd(317, 250, 30, {speed:0, img:'ushi'}),
+                                  g1: {x0:90,x1:236,y:318,op:'x',v:3,wob:0}, g2: {x0:244,x1:390,y:318,op:'-',v:10,wob:0}, t:0 };
   const D = TITLE_DEMO; D.t += 16;
-  if (D.t % 1400 < 16){ D.a.pop = CONFIG.popDur; D.g1.wob = 420; }
+  { const u=(D.t%2800)/2800, k=Math.min(1,u/0.6), y=445-160*(1-(1-k)*(1-k));
+    if (u<0.02 && D.a.n!==8){ D.a.n=8; D.a.pop=CONFIG.popDur*0.6; }                 // ひとまわりしたら、また下から
+    if (y<D.g1.y && D.a.n===8){ D.a.n=24; D.a.pop=CONFIG.popDur; D.a.badgeT=CONFIG.badgeDur; D.g1.wob=420; }
+    D.a.y=y; }
   tickCrowd(D.a, 16); tickCrowd(D.e, 16); D.g1.wob = Math.max(0, D.g1.wob-16);
   drawGate(D.g1); drawGate(D.g2);
   drawCrowd(D.e, 'ushi', 27, CONFIG.maxDraw); badge(D.e, '30', '#ff8a8a');
-  drawCrowd(D.a, 'heavy', 25, CONFIG.maxDraw); badge(D.a, '24', '#9fd0ff');
+  drawCrowd(D.a, 'heavy', 25, CONFIG.maxDraw); badge(D.a, ''+D.a.n, '#9fd0ff');
 
+  // 記録のふだ
+  { const s='BEST '+Store.get();
+    ctx.save(); ctx.textAlign='center'; ctx.font='bold 13px '+TITLE_FONT; const w=ctx.measureText(s).width+30, x=cx-w/2, y=468;
+    rrect(x,y,w,26,13); ctx.fillStyle='rgba(8,12,34,0.8)'; ctx.fill();
+    ctx.strokeStyle='rgba(255,226,122,0.6)'; ctx.lineWidth=1; ctx.stroke();
+    ctx.fillStyle='#ffe27a'; ctx.fillText(s, cx, y+18); ctx.restore(); }
+  // スタートの合図（ふわっと明滅する丸い帯）
+  { const p=0.5+0.5*Math.sin(t*3.2), w=420, h=54, x=cx-w/2, y=506;
+    ctx.save(); ctx.globalAlpha=0.76+0.24*p; ctx.shadowColor='rgba(110,180,255,0.9)'; ctx.shadowBlur=8+14*p;
+    rrect(x,y,w,h,27); ctx.fillStyle='rgba(16,34,84,0.92)'; ctx.fill(); ctx.shadowBlur=0;
+    ctx.strokeStyle='#8fc8ff'; ctx.lineWidth=2.5; ctx.stroke();
+    ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.font='900 21px '+TITLE_FONT;
+    ctx.fillText('▶  スペース ／ クリック ／ タップでスタート', cx, y+35, w-30); ctx.restore(); }
+  // 「あそびかた」ボタン
+  { const b=TITLE_HELP_BTN;
+    ctx.save(); rrect(b.x,b.y,b.w,b.h,21); ctx.fillStyle='rgba(40,14,20,0.85)'; ctx.fill();
+    ctx.strokeStyle='rgba(255,138,138,0.75)'; ctx.lineWidth=1.5; ctx.stroke();
+    ctx.fillStyle='#ffe1dc'; ctx.textAlign='center'; ctx.font='bold 17px '+TITLE_FONT;
+    ctx.fillText('？  あそびかた（H キー）', cx, b.y+28, b.w-24); ctx.restore(); }
+  // 操作の要点（小さく2行）
+  ctx.textAlign='center'; ctx.font='14px '+TITLE_FONT; ctx.fillStyle='rgba(200,214,240,0.9)';
+  ctx.fillText(TITLE_INFO[3], cx, 646, W-24);
+  ctx.fillText('R リスタート　・　M 音　・　P ポーズ', cx, 668, W-24);
+}
+// v05：「あそびかた」の面（タイトルにあった説明の文をそのまま移した。H／Esc／クリック／タップで閉じる）
+function renderTitleHelp(){
+  const cx=W/2;
+  ctx.save();
+  ctx.fillStyle='rgba(4,6,18,0.5)'; ctx.fillRect(0,0,W,H);
+  rrect(16,130,W-32,420,22); ctx.fillStyle='rgba(10,14,36,0.94)'; ctx.fill();
+  ctx.strokeStyle='rgba(143,200,255,0.65)'; ctx.lineWidth=2; ctx.stroke();
   ctx.textAlign='center';
-  const info = [
-    '大砲から兵隊を撃ち出して、青いゲートで増やすさー。',
-    '赤いゲートは人数が減るから避けること。',
-    '上から降りてくる赤軍とぶつけて、全部やっつけろー。',
-    '← → ／ マウス・指で移動　　Space ／ 長押しで発射',
-  ];
-  ctx.font='14px "Segoe UI"'; ctx.fillStyle='#dbe7ff';
-  info.forEach((t,i)=>ctx.fillText(t, W/2, 440+i*24));
-
-  ctx.fillStyle='#9fb0e8'; ctx.font='13px "Segoe UI"';
-  ctx.fillText('BEST '+Store.get(), W/2, 560);
-  const blink=(clock()/500|0)%2===0;
-  ctx.fillStyle=blink?'#ffe27a':'#667'; ctx.font='bold 22px "Segoe UI"';
-  ctx.fillText('スペース / クリックでスタート', W/2, 620);
+  ctx.font='900 30px '+TITLE_FONT; ctx.fillStyle='#ffe27a'; ctx.fillText('あそびかた', cx, 182);
+  ctx.strokeStyle='rgba(143,200,255,0.3)'; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(60,200); ctx.lineTo(W-60,200); ctx.stroke();
+  ctx.font='17px '+TITLE_FONT; ctx.fillStyle='#e6efff';
+  TITLE_INFO.forEach((s,i)=>ctx.fillText(s, cx, 246+i*46, W-56));
+  ctx.font='15px '+TITLE_FONT; ctx.fillStyle='#9fb0e8';
+  ctx.fillText('R リスタート　・　M 音　・　P ポーズ', cx, 430, W-56);
+  { const w=400, h=42, x=cx-w/2, y=476;
+    rrect(x,y,w,h,21); ctx.fillStyle='rgba(16,34,84,0.95)'; ctx.fill(); ctx.strokeStyle='#8fc8ff'; ctx.lineWidth=2; ctx.stroke();
+    ctx.fillStyle='#fff'; ctx.font='900 16px '+TITLE_FONT; ctx.fillText('とじる（クリック ／ タップ ／ H）　スペースでスタート', cx, y+27, w-24); }
+  ctx.restore();
 }
 
 // ---- Input ---------------------------------------------------------------
@@ -690,6 +783,9 @@ window.addEventListener('blur',          () => { pointerDown=false; });
 function onKey(code){
   if (code==='KeyM'){ SFX.toggle(); return; }
   if (code==='KeyR'){ startGame(); return; }
+  if (state==='title'){                                              // v05：タイトル画面を作り直し＝H で「あそびかた」を開け閉め
+    if (code==='KeyH'){ titleHelp=!titleHelp; return; }
+    if (code==='Escape' && titleHelp){ titleHelp=false; return; } }
   if (state==='title' || state==='over'){ if (code==='Space'||code==='Enter') startGame(); return; }
   if (code==='KeyP'){ state = state==='play'?'pause':'play'; if (state==='pause') BGM.pause(); else BGM.resume(); return; }
 }
