@@ -369,7 +369,7 @@ function render(){
   // 背景（D4 空間表現：花園の情景。シェイクで端に隙間が出ないよう少し大きめに描く）
   drawGarden(state!=='play' ? 'title' : (dangerNow() ? 'pinch' : ((mode==='boss'&&enemy) ? 'boss' : 'play')));
   // タイトルヘッダ（背景が絵になったので影で可読性を確保）
-  ctx.save();
+  ctx.save(); if(state==='title') ctx.globalAlpha=0;
   ctx.shadowColor='rgba(0,0,0,0.85)'; ctx.shadowBlur=8;
   ctx.textAlign='left'; ctx.fillStyle='#ffe27a'; ctx.font='bold 26px "Segoe UI",sans-serif'; ctx.fillText('フラワーポップ', FX, 40);
   ctx.fillStyle='#9aa8dd'; ctx.font='12px "Segoe UI"'; ctx.fillText('4色 / 4つ以上で消去 / 連鎖でスコアアップ', FX, 58);
@@ -537,33 +537,95 @@ function drawBossToast(px){
   }
   ctx.restore();
 }
-function renderTitle(){
-  ctx.textAlign='center'; const cx=C.width/2;
-  // 文字の下地（花園の絵が透けるうすい暗幕）＝キービジュアルを活かしつつ可読性を確保
-  { const g=ctx.createLinearGradient(0,70,0,C.height);
-    g.addColorStop(0,'rgba(6,9,22,0.00)'); g.addColorStop(0.22,'rgba(6,9,22,0.55)'); g.addColorStop(1,'rgba(6,9,22,0.72)');
-    ctx.fillStyle=g; ctx.fillRect(0,70,C.width,C.height-70); }
-  ctx.save(); ctx.shadowColor='rgba(255,180,90,0.85)'; ctx.shadowBlur=18;
-  ctx.fillStyle='#fff'; ctx.font='bold 38px "Segoe UI"'; ctx.fillText('フラワーポップ', cx, 110);
+// ── v13：タイトル画面を作り直し（大きなロゴ・はずむ花・カード型のモード選び）──
+const TITLE_DESC={endless:'じっくり、どこまでも', boss:'魚 → イノシシ → 太陽 を連鎖でたおせ'};
+const TITLE_CARD={x:75,w:320,h:52,y0:214,gap:62};
+function rrPath(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  ctx.lineTo(x+w,y+h-r); ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h); ctx.lineTo(x+r,y+h); ctx.quadraticCurveTo(x,y+h,x,y+h-r);
+  ctx.lineTo(x,y+r); ctx.quadraticCurveTo(x,y,x+r,y); ctx.closePath(); }
+function titleLogo(text,cx,y,size,t){
+  ctx.save(); ctx.textAlign='center'; ctx.textBaseline='alphabetic'; ctx.lineJoin='round';
+  ctx.font='900 '+size+'px "Yu Gothic UI","Hiragino Sans","Meiryo","Segoe UI",sans-serif';
+  const chars=[...text], ws=chars.map(ch=>ctx.measureText(ch).width), total=ws.reduce((p,q)=>p+q,0);
+  let x=cx-total/2;
+  chars.forEach((ch,i)=>{
+    const e=Math.max(0,Math.min(1,(t-0.15-i*0.07)/0.45));                         // 1文字ずつ飛びこんでくる
+    const back=1+2.70158*Math.pow(e-1,3)+1.70158*Math.pow(e-1,2);
+    const bob=Math.sin(t*2.2-i*0.55)*3*e;                                           // そのあとは波うつ
+    ctx.save(); ctx.translate(x+ws[i]/2, y+bob-(1-e)*40); ctx.scale(back,back); ctx.globalAlpha=e;
+    ctx.shadowColor='rgba(255,140,200,0.95)'; ctx.shadowBlur=24;
+    ctx.strokeStyle='#1b1145'; ctx.lineWidth=11; ctx.strokeText(ch,0,0);
+    ctx.shadowBlur=0;
+    ctx.strokeStyle='#ffffff'; ctx.lineWidth=4.5; ctx.strokeText(ch,0,0);
+    const g=ctx.createLinearGradient(0,-size*0.9,0,size*0.12);
+    g.addColorStop(0,'#fff8d2'); g.addColorStop(0.45,'#ffd84f'); g.addColorStop(1,'#ff6fa8');
+    ctx.fillStyle=g; ctx.fillText(ch,0,0);
+    ctx.restore(); x+=ws[i]; });
   ctx.restore();
-  const demo=[1,2,3,4,2,1]; demo.forEach((d,i)=>drawPuyo(cx-90+i*36,150,13,d,1,1));
-  // モード選択
-  ctx.font='bold 20px "Segoe UI"';
-  MODES.forEach((m,i)=>{ const y=220+i*44;
-    if(i===menuIdx){ ctx.fillStyle='rgba(120,220,255,0.22)'; ctx.fillRect(cx-155,y-25,310,36); ctx.fillStyle='#ffe27a'; }
-    else ctx.fillStyle='#9bbace';
-    ctx.fillText((i===menuIdx?'▶ ':'   ')+m.label, cx, y); });
-  ctx.font='13px "Segoe UI"'; ctx.fillStyle='#bcd';
-  ctx.fillText('↑↓ で選択 ／ Space・クリックで決定', cx, 332);
-  ctx.fillText('ボス連戦：連鎖で敵を攻撃！ 魚→イノシシ→太陽 を倒せ', cx, 356);
-  ctx.fillText('← →移動  Z/X(↑)回転  ↓落下  Space一気落とし  P/M', cx, 380);
-  ctx.fillStyle='#6d7bb0'; ctx.font='12px "Segoe UI"';
-  ctx.fillText('ここは、灯り絶えた花園。四季の番人たちが、還る道を見失った。', cx, 400);
-  ctx.fillStyle='#8a97c8';
-  ctx.fillText('ハイスコア '+hi+' ／ 最大連鎖 '+hiChain+' ／ ボス撃破 '+bossClears+'回', cx, 418);
-  const blink=(clock()/500|0)%2===0;
-  ctx.fillStyle=blink?'#ffe27a':'#667'; ctx.font='bold 22px "Segoe UI"';
-  ctx.fillText('スタート', cx, 448);
+}
+function renderTitle(){
+  const cx=C.width/2, W=C.width, H=C.height, t=clock()/1000;
+  // 下地：まん中を少し明るく、ふちを暗く
+  { const g=ctx.createRadialGradient(cx,150,40,cx,230,H*0.8);
+    g.addColorStop(0,'rgba(90,60,150,0.30)'); g.addColorStop(0.5,'rgba(10,12,34,0.35)'); g.addColorStop(1,'rgba(4,6,18,0.80)');
+    ctx.fillStyle=g; ctx.fillRect(-10,-10,W+20,H+20); }
+  // 英字の小見出し
+  ctx.save(); ctx.textAlign='center'; ctx.font='bold 12px "Segoe UI",sans-serif'; ctx.fillStyle='rgba(170,220,255,0.85)';
+  { const s='FLOWER POP'; const step=13; [...s].forEach((ch,i)=>ctx.fillText(ch, cx-(s.length-1)*step/2+i*step, 50)); }
+  ctx.strokeStyle='rgba(170,220,255,0.45)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(cx-150,46); ctx.lineTo(cx-82,46); ctx.moveTo(cx+82,46); ctx.lineTo(cx+150,46); ctx.stroke();
+  ctx.restore();
+  // ロゴ
+  titleLogo('フラワーポップ', cx, 116, 54, t);
+  // はずむ花（左から順にボヨヨン）
+  const demo=[1,2,3,4,2,1];
+  demo.forEach((d,i)=>{ const ph=(t*1.1-i*0.16)%1.6, k=ph<0.6?ph/0.6:1;
+    const w=Math.sin(k*Math.PI*3)*Math.exp(-3*k)*0.34, hop=ph<0.6?Math.sin(k*Math.PI)*9:0;
+    const x=cx-95+i*38, y=160-hop;
+    ctx.save(); ctx.translate(x,y); ctx.scale(1+w,1-w); ctx.translate(-x,-y); drawPuyo(x,y,14,d,1,1); ctx.restore(); });
+  // ひとこと
+  ctx.textAlign='center'; ctx.font='13px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif'; ctx.fillStyle='rgba(205,214,255,0.92)';
+  ctx.fillText('ここは、灯り絶えた花園。四季の番人たちが、還る道を見失った。', cx, 196);
+  // モードのカード
+  MODES.forEach((m,i)=>{ const x=TITLE_CARD.x, y=TITLE_CARD.y0+i*TITLE_CARD.gap, w=TITLE_CARD.w, h=TITLE_CARD.h, sel=i===menuIdx;
+    ctx.save();
+    if(sel){ const pulse=0.5+0.5*Math.sin(t*4.2);
+      ctx.shadowColor='rgba(255,170,90,'+(0.55+0.35*pulse).toFixed(2)+')'; ctx.shadowBlur=14+10*pulse;
+      const g=ctx.createLinearGradient(x,y,x+w,y+h); g.addColorStop(0,'#ff6fa8'); g.addColorStop(1,'#ffb347');
+      rrPath(x,y,w,h,16); ctx.fillStyle=g; ctx.fill(); ctx.shadowBlur=0;
+      const hl=ctx.createLinearGradient(0,y,0,y+h); hl.addColorStop(0,'rgba(255,255,255,0.38)'); hl.addColorStop(0.5,'rgba(255,255,255,0)');
+      rrPath(x,y,w,h,16); ctx.fillStyle=hl; ctx.fill();
+      ctx.strokeStyle='#fff'; ctx.lineWidth=2.5; rrPath(x,y,w,h,16); ctx.stroke();
+    } else {
+      rrPath(x,y,w,h,16); ctx.fillStyle='rgba(18,24,60,0.72)'; ctx.fill();
+      ctx.strokeStyle='rgba(150,170,240,0.45)'; ctx.lineWidth=1.5; ctx.stroke(); }
+    ctx.textAlign='center';
+    ctx.font='900 20px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif';
+    if(sel){ ctx.strokeStyle='rgba(90,20,60,0.55)'; ctx.lineWidth=4; ctx.lineJoin='round'; ctx.strokeText(m.label,cx,y+24); }
+    ctx.fillStyle=sel?'#fff':'#aebbe6'; ctx.fillText(m.label, cx, y+24);
+    ctx.font='12px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif'; ctx.fillStyle=sel?'rgba(70,20,40,0.9)':'rgba(140,155,210,0.85)';
+    ctx.fillText(TITLE_DESC[m.key]||'', cx, y+42);
+    if(sel){ const ax=x+22+Math.sin(t*6)*3; ctx.fillStyle='#fff'; ctx.beginPath(); ctx.moveTo(ax-6,y+h/2-8); ctx.lineTo(ax+7,y+h/2); ctx.lineTo(ax-6,y+h/2+8); ctx.closePath(); ctx.fill(); }
+    ctx.restore(); });
+  // 記録のふだ
+  { const items=['ハイスコア '+hi, '最大連鎖 '+hiChain, 'ボス撃破 '+bossClears+'回'];
+    ctx.font='bold 12px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif';
+    const ws=items.map(s=>ctx.measureText(s).width+22), total=ws.reduce((p,q)=>p+q,0)+8*(items.length-1);
+    let x=cx-total/2; const y=346;
+    items.forEach((s,i)=>{ rrPath(x,y,ws[i],24,12); ctx.fillStyle='rgba(10,14,40,0.70)'; ctx.fill();
+      ctx.strokeStyle='rgba(255,226,122,0.55)'; ctx.lineWidth=1; ctx.stroke();
+      ctx.fillStyle='#ffe27a'; ctx.textAlign='center'; ctx.fillText(s, x+ws[i]/2, y+16); x+=ws[i]+8; }); }
+  // スタートの合図（ふわっと明滅）
+  { const p=0.5+0.5*Math.sin(t*3.2), w=270, h=38, x=cx-w/2, y=386;
+    ctx.save(); ctx.globalAlpha=0.72+0.28*p; ctx.shadowColor='rgba(120,220,255,0.9)'; ctx.shadowBlur=8+12*p;
+    rrPath(x,y,w,h,19); ctx.fillStyle='rgba(20,40,90,0.85)'; ctx.fill(); ctx.shadowBlur=0;
+    ctx.strokeStyle='#8fe0ff'; ctx.lineWidth=2; ctx.stroke();
+    ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.font='900 17px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif';
+    ctx.fillText('▶  タップ ／ Space でスタート', cx, y+25); ctx.restore(); }
+  // 操作（小さく2行）
+  ctx.textAlign='center'; ctx.font='11px "Yu Gothic UI","Meiryo","Segoe UI",sans-serif'; ctx.fillStyle='rgba(150,165,215,0.9)';
+  ctx.fillText('← → 移動　　Z / X 回転　　↓ 落下　　Space 一気落とし', cx, 450);
+  ctx.fillText('↑ ↓ でモードを選ぶ　　P ポーズ　　M 音', cx, 467);
 }
 function renderHowTo(){
   ctx.textAlign='center'; const cx=C.width/2;
@@ -673,9 +735,11 @@ document.addEventListener('keyup', e=>{
   if(e.code==='ArrowLeft'  && dasDir===-1) dasDir=0;
   if(e.code==='ArrowRight' && dasDir=== 1) dasDir=0;
 });
-C.addEventListener('click', ()=>{ Audio.ensure();
+C.addEventListener('click', (ev)=>{ Audio.ensure();
   if(state==='howto') confirmHowTo();
-  else if(state==='title') start(MODES[menuIdx].key);
+  else if(state==='title'){ const rc=C.getBoundingClientRect(), px=(ev.clientX-rc.left)*C.width/rc.width, py=(ev.clientY-rc.top)*C.height/rc.height;   // v13：押したカードのモードで始まる
+    MODES.forEach((m,i)=>{ const y=TITLE_CARD.y0+i*TITLE_CARD.gap; if(px>=TITLE_CARD.x&&px<=TITLE_CARD.x+TITLE_CARD.w&&py>=y&&py<=y+TITLE_CARD.h) menuIdx=i; });
+    start(MODES[menuIdx].key); }
   else if(state==='over'){ state='title'; Audio.cursor(); } });
 // ── サウンド（WebAudio・ファイル不要）────────────────────────
 const Audio=(function(){
