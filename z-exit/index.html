@@ -34,6 +34,22 @@
   .tbtn { margin-top:20px; padding:12px 46px; font-size:20px; letter-spacing:.3em; background:#1c241c; color:#cfd8c8; border:1px solid #5a6a52; cursor:pointer; }
   .tbtn:active { background:#31402c; }
   .tbtn[disabled] { opacity:.4; }
+  /* v04：タイトル画面を作り直し（にじむ光の題字・走査線・英字の小見出し・光るはじめるボタン） */
+  #title { background:radial-gradient(ellipse at 50% 34%,#18241c 0%,#070a08 55%,#000 100%); overflow:hidden; }
+  #title::before { content:""; position:absolute; inset:0; pointer-events:none; background:repeating-linear-gradient(0deg,rgba(255,255,255,.035) 0 1px,transparent 1px 4px); }
+  #title::after { content:""; position:absolute; inset:0; pointer-events:none; box-shadow:inset 0 0 160px 40px #000; }
+  #title > * { position:relative; z-index:1; }
+  #title .teng { color:#9fe0a8; font-size:clamp(10px,2.4vw,14px); font-weight:900; letter-spacing:.6em; margin-bottom:6px; text-shadow:0 0 10px rgba(120,255,140,.5); }
+  #title h1 { font-weight:900; font-size:clamp(56px,15vw,128px); letter-spacing:.1em; line-height:1.15; text-shadow:none; animation:flick 4.5s infinite, zxIn 1.3s both; }
+  #title h1 .lg { position:relative; display:inline-block; white-space:nowrap; }
+  #title h1 .lg::before { content:attr(data-t); position:absolute; left:0; top:0; color:#030604; -webkit-text-fill-color:#030604; -webkit-text-stroke:.16em #030604; filter:drop-shadow(.035em 0 0 rgba(255,50,50,.6)) drop-shadow(-.035em 0 0 rgba(70,255,150,.55)) drop-shadow(0 0 .3em rgba(120,255,140,.55)); }
+  #title h1 .lg::after { content:attr(data-t); position:absolute; left:0; top:0; color:#e6ffe8; -webkit-text-fill-color:#e6ffe8; -webkit-text-stroke:.035em #e6ffe8; }
+  #title h1 .lgt { position:relative; z-index:1; background:linear-gradient(180deg,#ffffff 0%,#d6ecd0 45%,#7f9d7a 80%,#3f5a3e 100%); -webkit-background-clip:text; background-clip:text; color:transparent; -webkit-text-fill-color:transparent; }
+  #title .sub { color:#b4c4ac; letter-spacing:.5em; font-weight:bold; margin-top:10px; }
+  #title .tbtn { padding:13px 52px; font-weight:900; background:rgba(18,32,20,.92); color:#eaffea; border:2px solid #9fe0a8; animation:zxGlow 2s ease-in-out infinite; }
+  #title .tbtn[disabled] { animation:none; border-color:#5a6a52; color:#cfd8c8; }
+  @keyframes zxIn { from{ transform:scale(1.25); filter:blur(14px) } to{ transform:none; filter:none } }
+  @keyframes zxGlow { 0%,100%{ box-shadow:0 0 6px rgba(120,255,140,.25) } 50%{ box-shadow:0 0 26px rgba(120,255,140,.8), inset 0 0 12px rgba(120,255,140,.25) } }
   .trow { display:flex; gap:14px; margin-top:18px; flex-wrap:wrap; justify-content:center; }
   .sbtn { padding:8px 18px; font-size:14px; background:#141a14; color:#9aa892; border:1px solid #3c463a; cursor:pointer; }
   #zukanPanel, #setPanel { position:fixed; inset:0; z-index:90; background:rgba(4,6,4,.96); color:#cfc8b8; display:none; flex-direction:column; align-items:center; padding:30px 10px; overflow:auto; }
@@ -63,7 +79,8 @@
 <div id="fade"></div>
 
 <div id="title" class="ovl" style="display:flex;">
-  <h1>Z番出口</h1>
+  <div class="teng">EXIT Z ― ZUNDA UNDERPASS</div>
+  <h1><span class="lg" data-t="Z番出口"><span class="lgt">Z番出口</span></span></h1>
   <div class="sub">— ずんだの地下道 —</div>
   <div class="paper">
     お客様へ　お願い<br>
@@ -104,7 +121,7 @@
   </div>
 </div>
 <div id="credit">音楽:Suno自作曲 / 効果音:効果音ラボ / VOICEVOX:ずんだもん・四国めたん・東北イタコ</div>
-<div id="verTag">Z番出口 v03</div>
+<div id="verTag">Z番出口 v04</div>
 
 <script>
 window.onerror = function(m, s, l, c){ var e=document.getElementById('errbar'); e.style.display='block'; e.textContent+='[ERR] '+m+' @'+(s||'').split('/').pop()+':'+l+'\n'; };
