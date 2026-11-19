@@ -77,7 +77,7 @@ const IS_TOUCH = (function(){ try{
 // 画面内タップボタンの当たり判定（canvas座標）。描画とヒット判定で同じ矩形を使う
 function btnPause(){ return { x:W-56, y:H-96, w:44, h:44 }; }
 function btnSound(){ return { x:W-56, y:H-44, w:44, h:32 }; }
-function btnReroll(){ const r=cardRect(1); return { x:r.x+r.w/2-92, y:r.y+r.h+18, w:184, h:44 }; }
+function btnReroll(){ const r=cardRect(0); return { x:W/2-92, y:r.y+r.h+18, w:184, h:44 }; }
 function inRect(r,x,y){ return x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h; }
 
 const Stick = (function(){          // ※名前を Touch にすると DOM 組込みの Touch を隠すので Stick とする
@@ -322,8 +322,12 @@ const FX = (function(){
 })();
 
 // ---- Store（file://ではlocalStorageが例外を投げる環境があるためガード必須） --
+// v12：上級モード（強化のカードが3択→2択）。えらんだモードは覚えておく。自己ベストはモードごとに別
+let advMode = (function(){ try{ return localStorage.getItem('neo_survivor_adv')==='1'; }catch(e){ return false; } })();
+function setAdv(v){ advMode=!!v; try{ localStorage.setItem('neo_survivor_adv', advMode?'1':'0'); }catch(e){}
+  if (typeof titleRec!=='undefined') titleRec.at=-1e9; SFX.blip(); }
 const Store = {
-  key: 'neo_survivor_best', mem: 0,
+  get key(){ return advMode?'neo_survivor_best_adv':'neo_survivor_best'; }, mem: 0,
   get(){ try{ return +(localStorage.getItem(this.key)||0); }catch(e){ return this.mem; } },
   set(v){ this.mem=v; try{ localStorage.setItem(this.key, v); }catch(e){} },
 };
@@ -408,7 +412,7 @@ function newGame(){
     combo: 0, comboT: 0, maxCombo: 0,
     hurtCd: 0, flash: 0, heartT: 0,
     trail: [], ang: -Math.PI/2, moving: false, hitstop: 0,
-    choices: [], rerolls: 2, chestPending: false,
+    choices: [], rerolls: 2, chestPending: false, adv: advMode,
     won: false, endless: false,
     bg: makeStars(),
   };
@@ -817,7 +821,7 @@ function buildUpgradePool(){
 function triggerLevelUp(){
   const pool = buildUpgradePool();
   const picks=[];
-  for (let i=0;i<3 && pool.length;i++){ const idx=randi(pool.length); picks.push(pool[idx]); pool.splice(idx,1); }
+  for (let i=0;i<(G.adv?2:3) && pool.length;i++){ const idx=randi(pool.length); picks.push(pool[idx]); pool.splice(idx,1); }
   G.choices = picks;
   state='levelup';
   FX.burst(G.x,G.y,'#ffe27a',20,4);
@@ -830,7 +834,7 @@ function rerollChoices(){
   G.rerolls--;
   const pool = buildUpgradePool();
   const picks=[];
-  for (let i=0;i<3 && pool.length;i++){ const idx=randi(pool.length); picks.push(pool[idx]); pool.splice(idx,1); }
+  for (let i=0;i<(G.adv?2:3) && pool.length;i++){ const idx=randi(pool.length); picks.push(pool[idx]); pool.splice(idx,1); }
   G.choices = picks;
   SFX.cursor();     // 石坂v09：リロール（選び直し）は決定音と別の軽いカーソル音に
 }
@@ -850,10 +854,10 @@ function pickAtPointer(ev){
   const mx=(ev.clientX-rect.left)*(W/(rect.width||W));
   const my=(ev.clientY-rect.top)*(H/(rect.height||H));
   if (G.rerolls>0 && inRect(btnReroll(),mx,my)){ rerollChoices(); return; }   // v10：Eキーの無い端末用リロールボタン
-  for (let i=0;i<3;i++){ const r=cardRect(i); if(mx>=r.x&&mx<=r.x+r.w&&my>=r.y&&my<=r.y+r.h){ chooseUpgrade(i); return; } }
+  for (let i=0;i<G.choices.length;i++){ const r=cardRect(i); if(mx>=r.x&&mx<=r.x+r.w&&my>=r.y&&my<=r.y+r.h){ chooseUpgrade(i); return; } }
 }
 
-function cardRect(i){ const cw=170, ch=210, gap=20; const total=cw*3+gap*2; const sx=(W-total)/2; return { x:sx+i*(cw+gap), y:H/2-ch/2+20, w:cw, h:ch }; }
+function cardRect(i){ const cw=170, ch=210, gap=20, n=(G&&G.adv)?2:3; const total=cw*n+gap*(n-1); const sx=(W-total)/2; return { x:sx+i*(cw+gap), y:H/2-ch/2+20, w:cw, h:ch }; }
 
 // ---- Render --------------------------------------------------------------
 function render(){
@@ -1085,7 +1089,7 @@ function fmtTime(ms){ const s=Math.floor(ms/1000); return String(Math.floor(s/60
 
 // ── v11：タイトル画面を作り直し（ネオンの大きなロゴ・自機と敵の実演・記録の札・丸い帯のスタート・「あそびかた」の面）──
 const TITLE_FONT='"Yu Gothic UI","Hiragino Sans","Meiryo","Segoe UI",sans-serif';
-const TITLE_HELP_BTN={w:250,h:40,y:508};          // 「あそびかた」ボタン（横はまん中）
+const TITLE_HELP_BTN={w:200,h:40,y:508};          // v12：横に「上級モード」のボタンを並べたので幅を 250→200 に          // 「あそびかた」ボタン（横はまん中）
 const TITLE_DEMO=['grunt','fast','grunt','tank','bomber','fast','grunt','brute','fast','grunt'];   // 実演に出す敵
 let titleHelp=false;                               // 「あそびかた」の面を開いているか
 let titleRec={at:-1e9,best:0,kills:0,lv:0};        // 記録の札（保存データの読み直しは1秒に1回だけ）
@@ -1153,7 +1157,10 @@ function titleTap(ev){
   if(titleHelp){ titleHelp=false; SFX.blip(); return true; }
   const r=C.getBoundingClientRect(); if(!r.width||!r.height) return false;
   const x=(ev.clientX-r.left)*(W/r.width), y=(ev.clientY-r.top)*(H/r.height), b=TITLE_HELP_BTN;
-  if(x>=W/2-b.w/2-10 && x<=W/2+b.w/2+10 && y>=b.y-10 && y<=b.y+b.h+10){ titleHelp=true; SFX.blip(); return true; }
+  if(y>=b.y-10 && y<=b.y+b.h+10){
+    if(x>=W/2-6-b.w-10 && x<W/2){ titleHelp=true; SFX.blip(); return true; }          // 左＝あそびかた
+    if(x>=W/2 && x<=W/2+6+b.w+10){ setAdv(!advMode); return true; }                   // 右＝上級モードの切り替え（v12）
+  }
   return false;
 }
 function renderTitle(){
@@ -1176,7 +1183,7 @@ function renderTitle(){
   // 実演
   titleDemo(cx, 292, t);
   // 記録の札
-  { const rec=titleRecord(), items=['自己ベスト '+fmtTime(rec.best*1000), '累計撃破 '+rec.kills, '最高到達 Lv'+rec.lv];
+  { const rec=titleRecord(), items=[(advMode?'上級ベスト ':'自己ベスト ')+fmtTime(rec.best*1000), '累計撃破 '+rec.kills, '最高到達 Lv'+rec.lv];
     ctx.font='bold 14px '+TITLE_FONT; ctx.textAlign='center';
     const ws=items.map(s=>ctx.measureText(s).width+26), total=ws.reduce((p,q)=>p+q,0)+10*(items.length-1);
     let x=cx-total/2; const y=402;
@@ -1191,15 +1198,22 @@ function renderTitle(){
     ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.font='900 23px '+TITLE_FONT;
     ctx.fillText(IS_TOUCH?'▶  タップでスタート':'▶  クリック ／ Space でスタート', cx, y+35); ctx.restore(); }
   // 「あそびかた」ボタン
-  { const b=TITLE_HELP_BTN, x=cx-b.w/2;
+  { const b=TITLE_HELP_BTN, x=cx-6-b.w;
     rrect(x,b.y,b.w,b.h,20); ctx.fillStyle='rgba(18,24,60,0.80)'; ctx.fill();
     ctx.strokeStyle='rgba(150,170,240,0.65)'; ctx.lineWidth=1.5; ctx.stroke();
     ctx.fillStyle='#d6e2ff'; ctx.textAlign='center'; ctx.font='bold 18px '+TITLE_FONT;
-    ctx.fillText(IS_TOUCH?'？ あそびかた':'？ あそびかた（H）', cx, b.y+27); }
+    ctx.fillText(IS_TOUCH?'？ あそびかた':'？ あそびかた（H）', x+b.w/2, b.y+27);
+    // v12：上級モードのボタン（押すたびに入・切）
+    const ax=cx+6;
+    ctx.save(); if(advMode){ ctx.shadowColor='rgba(255,140,60,0.95)'; ctx.shadowBlur=10+8*(0.5+0.5*Math.sin(t*3.2)); }
+    rrect(ax,b.y,b.w,b.h,20); ctx.fillStyle=advMode?'rgba(110,34,10,0.92)':'rgba(18,24,60,0.80)'; ctx.fill(); ctx.shadowBlur=0;
+    ctx.strokeStyle=advMode?'#ffb066':'rgba(150,170,240,0.65)'; ctx.lineWidth=advMode?2.5:1.5; ctx.stroke(); ctx.restore();
+    ctx.fillStyle=advMode?'#ffe2b8':'#d6e2ff'; ctx.textAlign='center'; ctx.font='bold 16px '+TITLE_FONT;
+    ctx.fillText(advMode?'🔥 上級：強化は2択':'上級モード（2択）', ax+b.w/2, b.y+27); }
   // 操作の要点（小さく2〜3行）
   { const info=titleInfo(); ctx.textAlign='center'; ctx.font='15px '+TITLE_FONT; ctx.fillStyle='rgba(165,185,225,0.92)';
     ctx.fillText(info[0], cx, 578); ctx.fillText(info[1], cx, 600);
-    if(!IS_TOUCH) ctx.fillText('P ポーズ ／ R リスタート ／ M 音', cx, 622); }
+    if(!IS_TOUCH) ctx.fillText('P ポーズ ／ R リスタート ／ M 音 ／ J 上級モード', cx, 622); }
   ctx.lineWidth=1;
   if(titleHelp) renderTitleHelp();
 }
@@ -1239,8 +1253,8 @@ function renderLevelUp(){
   ctx.fillText(G.chestPending?'🎁 宝箱オープン！':'LEVEL UP!', W/2, H/2-140);
   ctx.restore();
   ctx.fillStyle='#cde'; ctx.font='15px "Segoe UI"';
-  ctx.fillText(IS_TOUCH ? 'カードをタップして選ぶ'
-                        : '強化を選択（1 / 2 / 3 または クリック）'+(G.rerolls>0?'　E でリロール残'+G.rerolls:''), W/2, H/2-108);
+  ctx.fillText(IS_TOUCH ? (G.adv?'【上級】':'')+'カードをタップして選ぶ'
+                        : (G.adv?'【上級】強化を選択（1 / 2 または クリック）':'強化を選択（1 / 2 / 3 または クリック）')+(G.rerolls>0?'　E でリロール残'+G.rerolls:''), W/2, H/2-108);
   for (let i=0;i<G.choices.length;i++){
     const u=G.choices[i]; const r=cardRect(i);
     ctx.fillStyle='#182046'; rrect(r.x,r.y,r.w,r.h,14); ctx.fill();
@@ -1287,7 +1301,7 @@ function renderOver(){
   ctx.restore();
   ctx.fillStyle='#8a97b0'; ctx.font='14px "Segoe UI"'; ctx.fillText('信号、途絶。', W/2, H/2-36);
   ctx.fillStyle='#ffe27a'; ctx.font='bold 30px "Segoe UI"'; ctx.fillText('生存 '+fmtTime(G.time), W/2, H/2-10);
-  ctx.fillStyle='#cde'; ctx.font='17px "Segoe UI"'; ctx.fillText('Lv '+G.level+'　撃破 '+G.kills+'　最大コンボ x'+G.maxCombo+'　自己ベスト '+fmtTime(Store.get()*1000), W/2, H/2+26);
+  ctx.fillStyle='#cde'; ctx.font='17px "Segoe UI"'; ctx.fillText('Lv '+G.level+'　撃破 '+G.kills+'　最大コンボ x'+G.maxCombo+(G.adv?'　上級ベスト ':'　自己ベスト ')+fmtTime(Store.get()*1000), W/2, H/2+26);
   const nb = Math.floor(G.time/1000) >= Store.get();
   if (nb){ ctx.fillStyle='#7CFC00'; ctx.font='bold 18px "Segoe UI"'; ctx.fillText('★ 自己ベスト更新！ ★', W/2, H/2+58); }
   const blink=(clock()/500|0)%2===0; ctx.fillStyle=blink?'#ffe27a':'#667'; ctx.font='bold 22px "Segoe UI"';
@@ -1307,6 +1321,7 @@ function onKey(code){
   if (state==='intro'){ if (code==='Space'||code==='Enter') confirmIntro(); return; }
   if (state==='title'){                                  // v11：タイトル画面を作り直し（H であそびかたを開閉。開いている間の Space / Enter / Esc は「とじる」）
     if (code==='KeyH'){ titleHelp=!titleHelp; SFX.blip(); return; }
+    if (code==='KeyJ' && !titleHelp){ setAdv(!advMode); return; }      // v12：上級モードの入・切
     if (titleHelp){ if (code==='Space'||code==='Enter'||code==='Escape'){ titleHelp=false; SFX.blip(); } return; }
   }
   if (code==='KeyR'){ startGame(); return; }
