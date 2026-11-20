@@ -731,8 +731,8 @@ function killEnemy(e){
   else if (e.type==='bomber'){
     // v13：1発ごとに AIM_RATE（1/10）の確率で、ばら撒きの向きではなく自分めがけて飛ぶ（ほんの少し難しく）
     const AIM_RATE=0.10, aimA=Math.atan2(G.y-e.y, G.x-e.x);
-    for (let i=0;i<7;i++){ const a=(Math.random()<AIM_RATE)?aimA:i*TAU/7;
-      G.ebullets.push({ x:e.x, y:e.y, vx:Math.cos(a)*2.3, vy:Math.sin(a)*2.3, r:5, dmg:10, age:0, life:2400, dead:false }); }
+    for (let i=0;i<7;i++){ const aim=Math.random()<AIM_RATE, a=aim?aimA:i*TAU/7;   // v14：ねらう弾には aim の印（色を変える）
+      G.ebullets.push({ x:e.x, y:e.y, vx:Math.cos(a)*2.3, vy:Math.sin(a)*2.3, r:5, dmg:10, age:0, life:2400, dead:false, aim }); }
     FX.burst(e.x,e.y,'#7dff6a',10,3); SFX.bomberPop();                 // 石坂v09：弾がばら撒かれた警告音（従来は無音）
   }
   // アイテムドロップ
@@ -895,7 +895,16 @@ function render(){
   for (const e of G.enemies){ drawEnemy(e); }
 
   // enemy bullets
-  for (const b of G.ebullets){ ctx.fillStyle='#7dff6a'; ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,TAU); ctx.fill();
+  for (const b of G.ebullets){
+    if (b.aim){   // v14：自分めがけて飛ぶ弾だけ特別な色＝赤むらさきの光・白いふち・うしろに尾・ゆっくり脈打つ
+      const sp=Math.hypot(b.vx,b.vy)||1, ux=b.vx/sp, uy=b.vy/sp, p=0.5+0.5*Math.sin(b.age*0.02);
+      ctx.save(); ctx.lineCap='round';
+      const tg=ctx.createLinearGradient(b.x,b.y,b.x-ux*26,b.y-uy*26); tg.addColorStop(0,'rgba(255,60,200,0.75)'); tg.addColorStop(1,'rgba(255,60,200,0)');
+      ctx.strokeStyle=tg; ctx.lineWidth=b.r*1.6; ctx.beginPath(); ctx.moveTo(b.x,b.y); ctx.lineTo(b.x-ux*26,b.y-uy*26); ctx.stroke();
+      ctx.shadowColor='#ff2bd6'; ctx.shadowBlur=12+8*p; ctx.fillStyle='#ff3fb8'; ctx.beginPath(); ctx.arc(b.x,b.y,b.r+1,0,TAU); ctx.fill();
+      ctx.shadowBlur=0; ctx.strokeStyle='#ffffff'; ctx.lineWidth=1.6; ctx.stroke();
+      ctx.fillStyle='#fff6fc'; ctx.beginPath(); ctx.arc(b.x,b.y,2.2,0,TAU); ctx.fill(); ctx.restore(); continue; }
+    ctx.fillStyle='#7dff6a'; ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,TAU); ctx.fill();
     ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.beginPath(); ctx.arc(b.x,b.y,2,0,TAU); ctx.fill(); }
 
   // projectiles
